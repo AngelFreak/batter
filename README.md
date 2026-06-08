@@ -11,6 +11,10 @@ Remote Android phone management platform. View, control, and manage multiple And
 
 - **Live video streaming** - Real-time H.264 video from Android devices via scrcpy, decoded in-browser with WebCodecs API
 - **Touch & keyboard control** - Full remote control with touch, scroll, and keyboard input forwarding
+- **Clipboard sync** - Copy text between your browser and the device in both directions
+- **File push & APK install** - Drag-and-drop files to the device's Download folder, or install APKs directly
+- **Multi-view** - Watch a grid of devices at once and take control of any one of them
+- **Multiplexer** - Broadcast the same touch/keyboard input to several devices simultaneously
 - **Device grid** - Dashboard with live thumbnail previews for all connected devices
 - **Adaptive quality** - Automatic thumbnail (360p/5fps) and full-quality (1024p/30fps) session tiers
 - **Screenshot cache** - Cached last screenshot shown when devices are disconnected or sessions are idle

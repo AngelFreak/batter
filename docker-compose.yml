@@ -21,7 +21,7 @@ services:
       - "${BATTER_PORT:-3000}:3000"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-batter}:${POSTGRES_PASSWORD:-batter}@postgres:5432/${POSTGRES_DB:-batter}?sslmode=disable
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required - run: openssl rand -hex 32}
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required - run: openssl rand -hex 32}"
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       PORT: "8080"
@@ -32,6 +32,15 @@ services:
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - batter_data:/app/data
+    healthcheck:
+      # Probes the Go backend's /health on :8080 — the real liveness signal,
+      # since the Next.js frontend can keep serving even if the API is down.
+      # Uses node (present in the image); the image has no wget/curl.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8080/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
