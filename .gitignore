@@ -1,6 +1,8 @@
 # Binaries
 bin/
 *.exe
+# Root build artifact (Makefile builds to bin/, but `go build` at root drops this here)
+/batter
 
 # Environment
 .env
@@ -30,8 +32,9 @@ data/
 # Playwright MCP
 .playwright-mcp/
 
-# Test screenshots
+# Test screenshots / uploaded artifacts
 dashboard-test*.png
+*.apk
 
 # TypeScript build info
 web/tsconfig.tsbuildinfo
