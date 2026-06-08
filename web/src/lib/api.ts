@@ -9,7 +9,9 @@ async function fetchWithAuth(path: string, options: RequestInit = {}): Promise<R
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
-  if (!headers.has('Content-Type') && options.body) {
+  // Only default to JSON for non-FormData bodies — the browser must set the
+  // multipart Content-Type (with boundary) itself for FormData uploads.
+  if (!headers.has('Content-Type') && options.body && !(options.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json');
   }
 
@@ -111,6 +113,34 @@ export interface DeviceInfo {
   height?: number;
   session_tier?: 'thumbnail' | 'full';
   last_seen_at?: string;
+}
+
+export async function pushFile(serial: string, file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}/push`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || 'Failed to push file');
+  }
+  return res.json();
+}
+
+export async function installAPK(serial: string, file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}/install`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || 'Failed to install APK');
+  }
+  return res.json();
 }
 
 export async function fetchScreenshot(serial: string): Promise<Blob | null> {

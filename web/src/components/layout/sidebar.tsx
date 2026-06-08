@@ -9,6 +9,8 @@ import { logout } from '@/lib/api';
 const navItems = [
   { href: '/dashboard', label: 'Devices', icon: '📱' },
   { href: '/groups', label: 'Groups', icon: '📁' },
+  { href: '/multiview', label: 'Multi View', icon: '🖥' },
+  { href: '/multiplexer', label: 'Multiplexer', icon: '🔗' },
 ];
 
 const adminItems = [

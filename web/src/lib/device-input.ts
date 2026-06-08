@@ -16,6 +16,7 @@ interface ControlMessage {
   text?: string;
   scroll_h?: number;
   scroll_v?: number;
+  paste?: boolean;
 }
 
 export class DeviceInputHandler {
@@ -23,6 +24,7 @@ export class DeviceInputHandler {
   private ws: WebSocket | null = null;
   private hasControl = false;
   private onStatusChange: ((status: string) => void) | null = null;
+  private onClipboardReceive: ((text: string) => void) | null = null;
   private serial: string = "";
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -33,6 +35,10 @@ export class DeviceInputHandler {
 
   setOnStatusChange(cb: (status: string) => void) {
     this.onStatusChange = cb;
+  }
+
+  setOnClipboardReceive(cb: (text: string) => void) {
+    this.onClipboardReceive = cb;
   }
 
   connect(serial: string) {
@@ -79,6 +85,9 @@ export class DeviceInputHandler {
         if (msg.error) {
           this.onStatusChange?.("denied");
           this.hasControl = false;
+        } else if (msg.type === "clipboard" && msg.text) {
+          navigator.clipboard.writeText(msg.text).catch(() => {});
+          this.onClipboardReceive?.(msg.text);
         }
       } catch {
         // Ignore non-JSON messages
@@ -155,6 +164,22 @@ export class DeviceInputHandler {
   };
 
   private handleKeyDown = (e: KeyboardEvent) => {
+    // Ctrl+V / Cmd+V: paste host clipboard to device
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+      e.preventDefault();
+      navigator.clipboard.readText().then(text => {
+        if (text) this.sendSetClipboard(text, true);
+      }).catch(() => {});
+      return;
+    }
+
+    // Ctrl+C / Cmd+C: request device clipboard
+    if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+      e.preventDefault();
+      this.sendGetClipboard();
+      return;
+    }
+
     e.preventDefault();
 
     const keycode = keycodeMap[e.code];
@@ -234,6 +259,20 @@ export class DeviceInputHandler {
 
   sendScreenOff() {
     this.send({ type: "screen_off" });
+  }
+
+  sendText(text: string) {
+    if (text) {
+      this.send({ type: "text", text });
+    }
+  }
+
+  sendSetClipboard(text: string, paste: boolean) {
+    this.send({ type: "set_clipboard", text, paste });
+  }
+
+  sendGetClipboard() {
+    this.send({ type: "get_clipboard" });
   }
 
   disconnect() {
