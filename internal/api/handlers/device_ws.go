@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sync"
 
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/gin-gonic/gin"
@@ -101,6 +102,7 @@ type ControlMessage struct {
 	Text      string  `json:"text"`
 	ScrollH   int32   `json:"scroll_h"`
 	ScrollV   int32   `json:"scroll_v"`
+	Paste     bool    `json:"paste"`
 }
 
 // ControlStream handles WebSocket connections for control input.
@@ -129,6 +131,33 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 		return
 	}
 	defer session.ReleaseControl(clientID)
+
+	// Write mutex for concurrent WebSocket writes (clipboard relay + control responses)
+	var wsMu sync.Mutex
+	done := make(chan struct{})
+	defer close(done)
+
+	// Clipboard relay goroutine: reads device clipboard and sends to WebSocket client
+	go func() {
+		clipCh := session.ClipboardCh()
+		for {
+			select {
+			case <-done:
+				return
+			case text, ok := <-clipCh:
+				if !ok {
+					return
+				}
+				msg, _ := json.Marshal(map[string]string{"type": "clipboard", "text": text})
+				wsMu.Lock()
+				err := conn.WriteMessage(ws.TextMessage, msg)
+				wsMu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	width := uint16(session.Width)
 	height := uint16(session.Height)
@@ -191,6 +220,14 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 				h.logger.Warn("failed to write screen_off control", "error", err)
 			}
 			encoded = device.EncodeKeyEvent(device.ActionUp, device.KeycodeSleep, 0, 0)
+
+		case "set_clipboard":
+			if msg.Text != "" {
+				encoded = device.EncodeSetClipboard(0, msg.Text, msg.Paste)
+			}
+
+		case "get_clipboard":
+			encoded = device.EncodeGetClipboard(device.CopyKeyCopy)
 
 		default:
 			h.logger.Debug("unknown control type", "type", msg.Type)

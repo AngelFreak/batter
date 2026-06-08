@@ -71,3 +71,32 @@ func TestEncodeBackOrScreenOn(t *testing.T) {
 	assert.Equal(t, byte(ActionDown), buf[1])
 	assert.Len(t, buf, 2)
 }
+
+func TestEncodeSetClipboard(t *testing.T) {
+	text := "clip"
+	buf := EncodeSetClipboard(7, text, true)
+
+	assert.Equal(t, byte(ControlTypeSetClipboard), buf[0])
+	assert.Equal(t, uint64(7), binary.BigEndian.Uint64(buf[1:9]))
+	assert.Equal(t, byte(1), buf[9]) // paste = true
+	assert.Equal(t, uint32(len(text)), binary.BigEndian.Uint32(buf[10:14]))
+	assert.Equal(t, text, string(buf[14:]))
+	assert.Len(t, buf, 14+len(text))
+}
+
+func TestEncodeSetClipboardNoPaste(t *testing.T) {
+	buf := EncodeSetClipboard(0, "", false)
+
+	assert.Equal(t, byte(ControlTypeSetClipboard), buf[0])
+	assert.Equal(t, byte(0), buf[9]) // paste = false
+	assert.Equal(t, uint32(0), binary.BigEndian.Uint32(buf[10:14]))
+	assert.Len(t, buf, 14)
+}
+
+func TestEncodeGetClipboard(t *testing.T) {
+	buf := EncodeGetClipboard(CopyKeyCopy)
+
+	assert.Equal(t, byte(ControlTypeGetClipboard), buf[0])
+	assert.Equal(t, byte(CopyKeyCopy), buf[1])
+	assert.Len(t, buf, 2)
+}

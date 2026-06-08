@@ -1,6 +1,7 @@
 package device
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -11,6 +12,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+// Device message types (sent by scrcpy-server to client via control connection).
+const (
+	DeviceMsgTypeClipboard    = 0
+	DeviceMsgTypeACKClipboard = 1
 )
 
 // SessionOptions configures a scrcpy session.
@@ -29,6 +36,7 @@ type Session struct {
 
 	videoConn   net.Conn
 	controlConn net.Conn
+	controlMu   sync.Mutex // serializes writes to controlConn
 	videoPort   int
 
 	// Video subscribers: id -> channel
@@ -38,6 +46,11 @@ type Session struct {
 	// Control ownership: only one client can send input at a time
 	controlOwner   string
 	controlOwnerMu sync.Mutex
+
+	// Clipboard from device
+	clipboardText string
+	clipboardMu   sync.RWMutex
+	clipboardCh   chan string
 
 	// Stored SPS/PPS for new subscribers
 	configPacket []byte
@@ -59,6 +72,7 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 		Serial:           serial,
 		SCID:             scid,
 		videoSubscribers: make(map[string]chan []byte),
+		clipboardCh:      make(chan string, 4),
 		cancel:           cancel,
 		done:             make(chan struct{}),
 		logger:           logger,
@@ -152,7 +166,10 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 	s.controlConn = controlConn
 	listener.Close()
 
-	// Step 8: Start video read loop
+	// Step 8: Start control read loop (reads clipboard messages from device)
+	go s.controlReadLoop(ctx)
+
+	// Step 9: Start video read loop
 	go s.videoReadLoop(ctx, adb, serial, abstractName)
 
 	return s, nil
@@ -310,11 +327,15 @@ func (s *Session) ReleaseControl(id string) {
 	}
 }
 
-// WriteControl sends a binary control message to the device.
+// WriteControl sends a binary control message to the device. It is safe to
+// call from multiple goroutines: writes are serialized so scrcpy's binary
+// control protocol is never interleaved.
 func (s *Session) WriteControl(data []byte) error {
 	if s.controlConn == nil {
 		return fmt.Errorf("control connection not established")
 	}
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
 	_, err := s.controlConn.Write(data)
 	return err
 }
@@ -354,4 +375,85 @@ func (s *Session) Close() {
 	case <-time.After(5 * time.Second):
 		s.logger.Warn("timeout waiting for video loop to finish")
 	}
+}
+
+// controlReadLoop reads device messages from the control connection.
+// Currently handles clipboard (type 0) and ACK (type 1) messages.
+func (s *Session) controlReadLoop(ctx context.Context) {
+	reader := bufio.NewReader(s.controlConn)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Read message type (1 byte)
+		msgType, err := reader.ReadByte()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.logger.Debug("control read loop ended", "error", err)
+			return
+		}
+
+		switch msgType {
+		case DeviceMsgTypeClipboard:
+			// Format: textLen(4) + text(N)
+			lenBuf := make([]byte, 4)
+			if _, err := io.ReadFull(reader, lenBuf); err != nil {
+				s.logger.Debug("control read clipboard length error", "error", err)
+				return
+			}
+			textLen := binary.BigEndian.Uint32(lenBuf)
+			if textLen > 10*1024*1024 { // 10MB sanity limit
+				s.logger.Warn("clipboard text too large", "size", textLen)
+				return
+			}
+			textBuf := make([]byte, textLen)
+			if _, err := io.ReadFull(reader, textBuf); err != nil {
+				s.logger.Debug("control read clipboard text error", "error", err)
+				return
+			}
+			text := string(textBuf)
+
+			s.clipboardMu.Lock()
+			s.clipboardText = text
+			s.clipboardMu.Unlock()
+
+			// Non-blocking send to clipboard channel
+			select {
+			case s.clipboardCh <- text:
+			default:
+				// Drop if no one is listening
+			}
+
+		case DeviceMsgTypeACKClipboard:
+			// Format: sequence(8)
+			ackBuf := make([]byte, 8)
+			if _, err := io.ReadFull(reader, ackBuf); err != nil {
+				s.logger.Debug("control read ACK error", "error", err)
+				return
+			}
+			// ACK is ignored for now
+
+		default:
+			s.logger.Debug("unknown device message type", "type", msgType)
+			return
+		}
+	}
+}
+
+// GetClipboardText returns the last received clipboard text from the device.
+func (s *Session) GetClipboardText() string {
+	s.clipboardMu.RLock()
+	defer s.clipboardMu.RUnlock()
+	return s.clipboardText
+}
+
+// ClipboardCh returns a channel that receives clipboard text updates from the device.
+func (s *Session) ClipboardCh() <-chan string {
+	return s.clipboardCh
 }

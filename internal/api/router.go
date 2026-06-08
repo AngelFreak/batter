@@ -90,6 +90,8 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 					deviceBySerial.POST("/session/upgrade", deviceHandler.UpgradeSession)
 					deviceBySerial.POST("/session/downgrade", deviceHandler.DowngradeSession)
 					deviceBySerial.POST("/wake", deviceHandler.WakeScreen)
+					deviceBySerial.POST("/push", deviceHandler.PushFile)
+					deviceBySerial.POST("/install", deviceHandler.InstallAPK)
 					deviceBySerial.PUT("", deviceHandler.UpdateDevice)
 					deviceBySerial.DELETE("", deviceHandler.DeleteDevice)
 				}

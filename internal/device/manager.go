@@ -368,6 +368,23 @@ func (m *Manager) Screenshot(ctx context.Context, serial string) ([]byte, error)
 	return png, nil
 }
 
+// PushFile pushes a local file to the device via ADB.
+func (m *Manager) PushFile(ctx context.Context, serial, localPath, remotePath string) error {
+	return m.adb.Push(ctx, serial, localPath, remotePath)
+}
+
+// InstallAPK installs an APK file on the device via ADB.
+func (m *Manager) InstallAPK(ctx context.Context, serial, apkPath string) error {
+	out, err := m.adb.Install(ctx, serial, apkPath)
+	if err != nil {
+		return fmt.Errorf("install failed: %w", err)
+	}
+	if !strings.Contains(string(out), "Success") {
+		return fmt.Errorf("install failed: %s", string(out))
+	}
+	return nil
+}
+
 // ScreenshotCache returns the screenshot cache (may be nil if not configured).
 func (m *Manager) ScreenshotCache() *ScreenshotCache {
 	return m.screenshotCache
