@@ -7,34 +7,43 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/XpertaDK/batter/internal/api/middleware"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	ws "github.com/gorilla/websocket"
 )
 
-var deviceUpgrader = ws.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 1024 * 1024, // 1MB for video frames
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Origin is validated by middleware
-	},
-}
-
 // DeviceWSHandler handles WebSocket connections for device video/control.
 type DeviceWSHandler struct {
 	deviceManager *device.Manager
 	logger        *slog.Logger
+	upgrader      ws.Upgrader
 }
 
-// NewDeviceWSHandler creates a new device WebSocket handler.
-func NewDeviceWSHandler(dm *device.Manager, logger *slog.Logger) *DeviceWSHandler {
+// NewDeviceWSHandler creates a new device WebSocket handler. allowedOrigins is
+// the same origin policy used for CORS; the WebSocket upgrader enforces it so a
+// page on an untrusted origin cannot open a control socket with a stolen-from-
+// the-tab JWT (cross-site WebSocket hijacking).
+func NewDeviceWSHandler(dm *device.Manager, logger *slog.Logger, allowedOrigins []string) *DeviceWSHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &DeviceWSHandler{
 		deviceManager: dm,
 		logger:        logger.With("handler", "device-ws"),
+		upgrader: ws.Upgrader{
+			ReadBufferSize:  4096,
+			WriteBufferSize: 1024 * 1024, // 1MB for video frames
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				// Non-browser clients (no Origin header) are gated by JWT auth.
+				if origin == "" {
+					return true
+				}
+				return middleware.IsOriginAllowed(origin, allowedOrigins)
+			},
+		},
 	}
 }
 
@@ -48,7 +57,7 @@ func (h *DeviceWSHandler) VideoStream(c *gin.Context) {
 		return
 	}
 
-	conn, err := deviceUpgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		h.logger.Error("failed to upgrade video websocket", "error", err)
 		return
@@ -115,7 +124,7 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 		return
 	}
 
-	conn, err := deviceUpgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		h.logger.Error("failed to upgrade control websocket", "error", err)
 		return

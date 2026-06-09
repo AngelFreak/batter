@@ -2,6 +2,7 @@ package api
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/XpertaDK/batter/internal/api/handlers"
 	"github.com/XpertaDK/batter/internal/api/middleware"
@@ -40,7 +41,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	// Handlers
 	authHandler := handlers.NewAuthHandler(cfg.DB, cfg.JWTManager, cfg.Logger)
 	deviceHandler := handlers.NewDeviceHandler(cfg.DeviceManager, cfg.DB, cfg.Logger)
-	deviceWSHandler := handlers.NewDeviceWSHandler(cfg.DeviceManager, cfg.Logger)
+	deviceWSHandler := handlers.NewDeviceWSHandler(cfg.DeviceManager, cfg.Logger, cfg.AllowedOrigins)
 	userHandler := handlers.NewUserHandler(cfg.DB, cfg.Logger)
 	groupHandler := handlers.NewGroupHandler(cfg.DB, cfg.DeviceManager, cfg.Logger)
 	userGroupHandler := handlers.NewUserGroupHandler(cfg.DB, cfg.Logger)
@@ -48,11 +49,14 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	// API v1
 	v1 := r.Group("/api/v1")
 	{
-		// Public auth routes
+		// Public auth routes. Rate-limit the unauthenticated ones per client IP
+		// to blunt brute-force / credential-stuffing and token-refresh abuse.
+		loginLimit := middleware.RateLimit(10, time.Minute)   // login attempts
+		refreshLimit := middleware.RateLimit(30, time.Minute) // token refreshes
 		v1.GET("/auth/needs-setup", authHandler.NeedsSetup)
-		v1.POST("/admin/setup", authHandler.Setup)
-		v1.POST("/auth/login", authHandler.Login)
-		v1.POST("/auth/refresh", authHandler.Refresh)
+		v1.POST("/admin/setup", loginLimit, authHandler.Setup)
+		v1.POST("/auth/login", loginLimit, authHandler.Login)
+		v1.POST("/auth/refresh", refreshLimit, authHandler.Refresh)
 		v1.POST("/auth/logout", authHandler.Logout)
 
 		// Protected routes

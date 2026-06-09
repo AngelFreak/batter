@@ -24,7 +24,7 @@ func CORS(config ...CORSConfig) gin.HandlerFunc {
 
 		allowOrigin := ""
 		if origin != "" {
-			if isOriginAllowed(origin, allowedOrigins) {
+			if IsOriginAllowed(origin, allowedOrigins) {
 				allowOrigin = origin
 			}
 		}
@@ -47,7 +47,11 @@ func CORS(config ...CORSConfig) gin.HandlerFunc {
 	}
 }
 
-func isOriginAllowed(origin string, allowedOrigins []string) bool {
+// IsOriginAllowed reports whether origin is permitted given allowedOrigins.
+// When allowedOrigins is empty it falls back to localhost-only (dev default).
+// It is exported so non-CORS code paths (e.g. the WebSocket upgrader) can
+// enforce the same origin policy.
+func IsOriginAllowed(origin string, allowedOrigins []string) bool {
 	if len(allowedOrigins) == 0 {
 		parsed, err := url.Parse(origin)
 		if err != nil {
