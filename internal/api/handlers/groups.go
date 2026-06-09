@@ -63,6 +63,11 @@ func (h *GroupHandler) ListGroups(c *gin.Context) {
 			"created_at":   createdAt,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read groups", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list groups"})
+		return
+	}
 
 	if groups == nil {
 		groups = []gin.H{}
@@ -251,6 +256,11 @@ func (h *GroupHandler) GetGroupDevices(c *gin.Context) {
 		}
 		serials = append(serials, serial)
 	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read group devices", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list group devices"})
+		return
+	}
 	if serials == nil {
 		serials = []string{}
 	}
@@ -299,6 +309,11 @@ func (h *GroupHandler) BatchStart(c *gin.Context) {
 			started++
 		}
 	}
+	if err := rows.Err(); err != nil {
+		// Sessions may already have started; report the partial result rather
+		// than a 500, but surface that the device list was truncated.
+		h.logger.Warn("batch start: error reading group devices", "error", err)
+	}
 
 	c.JSON(http.StatusOK, gin.H{"started": started, "failed": failed})
 }
@@ -335,6 +350,11 @@ func (h *GroupHandler) GetGroupAccess(c *gin.Context) {
 			"permission": permission,
 			"created_at": createdAt,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read group access", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list group access"})
+		return
 	}
 
 	if grants == nil {
@@ -392,6 +412,10 @@ func (h *GroupHandler) BatchStop(c *gin.Context) {
 			stopped++
 		}
 	}
+	if err := rows.Err(); err != nil {
+		// Sessions may already have stopped; report partial result, not a 500.
+		h.logger.Warn("batch stop: error reading group devices", "error", err)
+	}
 
 	c.JSON(http.StatusOK, gin.H{"stopped": stopped, "failed": failed})
 }
@@ -428,6 +452,11 @@ func (h *GroupHandler) GetGroupTeamAccess(c *gin.Context) {
 			"permission":    permission,
 			"created_at":    createdAt,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read team access", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list team access"})
+		return
 	}
 
 	if grants == nil {

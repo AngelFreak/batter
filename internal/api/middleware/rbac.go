@@ -59,11 +59,14 @@ func checkDeviceAccess(c *gin.Context, db *pgxpool.Pool, userID, serial, minPerm
 	for rows.Next() {
 		var perm string
 		if err := rows.Scan(&perm); err != nil {
-			continue
+			return false, err
 		}
 		if permissionLevel(perm) >= permLevel {
 			return true, nil
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
 	}
 
 	// Check group-based access
@@ -80,11 +83,14 @@ func checkDeviceAccess(c *gin.Context, db *pgxpool.Pool, userID, serial, minPerm
 	for rows2.Next() {
 		var perm string
 		if err := rows2.Scan(&perm); err != nil {
-			continue
+			return false, err
 		}
 		if permissionLevel(perm) >= permLevel {
 			return true, nil
 		}
+	}
+	if err := rows2.Err(); err != nil {
+		return false, err
 	}
 
 	// Check user group direct device access
@@ -101,11 +107,14 @@ func checkDeviceAccess(c *gin.Context, db *pgxpool.Pool, userID, serial, minPerm
 	for rows3.Next() {
 		var perm string
 		if err := rows3.Scan(&perm); err != nil {
-			continue
+			return false, err
 		}
 		if permissionLevel(perm) >= permLevel {
 			return true, nil
 		}
+	}
+	if err := rows3.Err(); err != nil {
+		return false, err
 	}
 
 	// Check user group device-group access
@@ -123,11 +132,14 @@ func checkDeviceAccess(c *gin.Context, db *pgxpool.Pool, userID, serial, minPerm
 	for rows4.Next() {
 		var perm string
 		if err := rows4.Scan(&perm); err != nil {
-			continue
+			return false, err
 		}
 		if permissionLevel(perm) >= permLevel {
 			return true, nil
 		}
+	}
+	if err := rows4.Err(); err != nil {
+		return false, err
 	}
 
 	return false, nil
@@ -166,9 +178,12 @@ func GetAccessibleSerials(c *gin.Context, db *pgxpool.Pool, userID, role string)
 	for rows.Next() {
 		var s string
 		if err := rows.Scan(&s); err != nil {
-			continue
+			return nil, err
 		}
 		serials = append(serials, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	if serials == nil {

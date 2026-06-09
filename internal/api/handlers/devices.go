@@ -79,6 +79,9 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 		dbDevices = append(dbDevices, d)
 		dbMap[d.Serial] = &dbDevices[len(dbDevices)-1]
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	// 2. Get live ADB state
 	adbDevices, err := h.deviceManager.ListDevices(ctx)

@@ -57,6 +57,11 @@ func (h *UserGroupHandler) ListUserGroups(c *gin.Context) {
 			"created_at":   createdAt,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read user groups", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list user groups"})
+		return
+	}
 
 	if groups == nil {
 		groups = []gin.H{}
@@ -192,6 +197,11 @@ func (h *UserGroupHandler) ListMembers(c *gin.Context) {
 			"role":         role,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read members", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list members"})
+		return
+	}
 
 	if members == nil {
 		members = []gin.H{}
@@ -292,6 +302,11 @@ func (h *UserGroupHandler) ListAccess(c *gin.Context) {
 			}
 		}
 		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read access grants", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list access"})
+		return
 	}
 
 	if grants == nil {
