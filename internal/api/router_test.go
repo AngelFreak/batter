@@ -45,6 +45,7 @@ type testEnv struct {
 	jwt    *auth.JWTManager
 	users  map[string]string // username -> id
 	adb    *unpluggedADB
+	dm     *device.Manager
 }
 
 // unpluggedADB records tethering's adb calls and fails them all, as for a
@@ -104,6 +105,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		jwt:   auth.NewJWTManager("test-secret", 3600),
 		users: map[string]string{},
 		adb:   &unpluggedADB{},
+		dm:    dm,
 	}
 	vpnSvc := &vpn.Service{
 		DB: db,

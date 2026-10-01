@@ -128,6 +128,8 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 			info.Height = adb.Height
 			info.SessionTier = adb.SessionTier
 			info.SessionQuality = adb.SessionQuality
+			info.Connection = adb.Connection
+			info.LANAddress = adb.LANAddress
 
 			// Update model/product from ADB if DB has empty values
 			if info.Model == "" && adb.Model != "" {
