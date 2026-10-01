@@ -112,6 +112,8 @@ export interface DeviceInfo {
   width?: number;
   height?: number;
   session_tier?: 'thumbnail' | 'full';
+  // Bitrate level of the full-quality session, shared by all its viewers.
+  session_quality?: 'low' | 'medium' | 'high';
   last_seen_at?: string;
   // Set when the device is tethered: its traffic goes through this profile.
   vpn_profile_id?: string;
@@ -189,9 +191,16 @@ export async function stopSession(serial: string) {
   return res.json();
 }
 
-export async function upgradeSession(serial: string) {
+// Switches the device's session to full quality. quality picks the bitrate
+// level (the session is shared: the latest level wins for every viewer);
+// change marks a viewer already watching that only switches level.
+export async function upgradeSession(
+  serial: string,
+  opts: { quality?: 'low' | 'medium' | 'high'; change?: boolean } = {},
+): Promise<{ session_tier: string; quality?: 'low' | 'medium' | 'high' }> {
   const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}/session/upgrade`, {
     method: 'POST',
+    body: JSON.stringify(opts),
   });
   if (!res.ok) throw new Error('Failed to upgrade session');
   return res.json();

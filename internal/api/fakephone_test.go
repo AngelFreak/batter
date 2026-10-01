@@ -101,3 +101,33 @@ func TestViewersJoiningTogetherShareKeyframes(t *testing.T) {
 		t.Fatalf("%d encoder resets for %d joining viewers, want 1-2", n, viewers)
 	}
 }
+
+func TestUpgradeValidatesAndAppliesQuality(t *testing.T) {
+	useFakePhone(t)
+	env := newTestEnv(t)
+	env.startFakeSession(t)
+	path := "/api/v1/devices/" + fakeSerial + "/session/upgrade"
+
+	if w := env.do(t, "admin", "POST", path, `{"quality":"ultra"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown level: status %d, want 400", w.Code)
+	}
+	w := env.do(t, "admin", "POST", path, `{"quality":"low"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"quality":"low"`) {
+		t.Fatalf("upgrade to low: %d %s", w.Code, w.Body.String())
+	}
+	// Everyone watching sees the level (one shared session).
+	if w := env.do(t, "admin", "POST", "/api/v1/devices", `{"serial":"`+fakeSerial+`"}`); w.Code != http.StatusCreated {
+		t.Fatalf("register: %d", w.Code)
+	}
+	if w := env.do(t, "admin", "GET", "/api/v1/devices/"+fakeSerial, ""); !strings.Contains(w.Body.String(), `"session_quality":"low"`) {
+		t.Fatalf("device list doesn't show the level: %s", w.Body.String())
+	}
+	w = env.do(t, "admin", "POST", path, `{"quality":"high","change":true}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"quality":"high"`) {
+		t.Fatalf("change to high: %d %s", w.Code, w.Body.String())
+	}
+	// No body: the default level, as before.
+	if w := env.do(t, "admin", "POST", path, ""); w.Code != http.StatusOK {
+		t.Fatalf("upgrade without a body: %d %s", w.Code, w.Body.String())
+	}
+}

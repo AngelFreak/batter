@@ -127,6 +127,7 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 			info.Width = adb.Width
 			info.Height = adb.Height
 			info.SessionTier = adb.SessionTier
+			info.SessionQuality = adb.SessionQuality
 
 			// Update model/product from ADB if DB has empty values
 			if info.Model == "" && adb.Model != "" {
@@ -464,11 +465,35 @@ func (h *DeviceHandler) StopSession(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "session stopped"})
 }
 
-// UpgradeSession switches a device session to full quality.
+// UpgradeSessionRequest is the optional body of POST .../session/upgrade.
+type UpgradeSessionRequest struct {
+	// Quality is low, medium or high (default medium).
+	Quality string `json:"quality"`
+	// Change marks a viewer that is already watching switching level, so
+	// it isn't counted as another full-quality viewer.
+	Change bool `json:"change"`
+}
+
+// UpgradeSession switches a device session to full quality at the
+// requested level. The device's session is shared: the latest level wins
+// for everyone watching.
 func (h *DeviceHandler) UpgradeSession(c *gin.Context) {
 	serial := c.Param("serial")
 
-	session, err := h.deviceManager.UpgradeSession(c.Request.Context(), serial)
+	var req UpgradeSessionRequest
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+	}
+	quality, err := device.ParseQuality(req.Quality)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	session, err := h.deviceManager.UpgradeSession(c.Request.Context(), serial, quality, req.Change)
 	if err != nil {
 		h.logger.Error("failed to upgrade session", "serial", serial, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -480,6 +505,7 @@ func (h *DeviceHandler) UpgradeSession(c *gin.Context) {
 		"width":        session.Width,
 		"height":       session.Height,
 		"session_tier": h.deviceManager.GetSessionTier(serial),
+		"quality":      h.deviceManager.GetSessionQuality(serial),
 	})
 }
 

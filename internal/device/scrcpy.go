@@ -25,6 +25,8 @@ const (
 type SessionOptions struct {
 	MaxSize int `json:"max_size"` // 0 = device default
 	MaxFPS  int `json:"max_fps"`  // 0 = no limit
+	// VideoBitRate in bits/s; 0 = scrcpy's default (8 Mbps).
+	VideoBitRate int `json:"video_bit_rate"`
 	// DisableAudio forces a video-only session. Audio is otherwise captured
 	// for full-tier sessions only: capturing the "output" source silences
 	// the phone, which nobody should pay for a grid thumbnail.
@@ -274,6 +276,9 @@ func buildServerArgs(scid uint32, version string, opts SessionOptions) []string 
 		maxFPS = 30
 	}
 	args = append(args, fmt.Sprintf("max_fps=%d", maxFPS))
+	if opts.VideoBitRate > 0 {
+		args = append(args, fmt.Sprintf("video_bit_rate=%d", opts.VideoBitRate))
+	}
 	return args
 }
 
