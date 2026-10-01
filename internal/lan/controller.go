@@ -39,13 +39,15 @@ type Profiles interface {
 	Assignments(ctx context.Context) (map[string]vpn.Assignment, error)
 }
 
-// Controller runs the phone LAN: it serves DHCP, finds the phone behind
-// each adapter over adb, points the phone's adb calls at its LAN address,
-// and keeps the firewall in line with leases and VPN assignments.
+// Controller runs the phone LAN: it moves the chosen box NIC into Batter's
+// namespace (see port.go), serves DHCP on it, finds the phone behind each
+// adapter over adb, points the phone's adb calls at its LAN address, and
+// keeps the firewall in line with leases and VPN assignments.
 type Controller struct {
-	Iface    string
 	Net      Network
 	Leases   *Leases
+	Ports    *PortSetting
+	Host     Host
 	Firewall *Firewall
 	ADB      ADB
 	Profiles Profiles
@@ -65,32 +67,34 @@ type Controller struct {
 	rules     string                // the phones the firewall was last applied for
 	appliedAt time.Time
 	fwErr     error
+
+	port     *adopted // the NIC in Batter's namespace, if any
+	state    string   // see Status
+	portErr  string
+	warning  string
+	dhcpStop context.CancelFunc
 }
 
 // reapplyEvery re-applies an unchanged ruleset now and then, repairing it
 // if something else removed it.
 const reapplyEvery = time.Minute
 
-// Run serves DHCP and reconciles until ctx is done. The firewall goes in
-// before DHCP starts, so no phone gets an address on an open network.
+// Run reconciles until ctx is done, then gives the port back to the box
+// (the setting stays, so the next start takes it again).
 func (c *Controller) Run(ctx context.Context) {
 	c.Pass(ctx)
-	go func() {
-		for ctx.Err() == nil {
-			if err := c.DHCPServer().Serve(ctx, c.Iface); err != nil {
-				c.Logger.Error("lan: DHCP server stopped; restarting", "error", err)
-				select {
-				case <-ctx.Done():
-				case <-time.After(5 * time.Second):
-				}
-			}
-		}
-	}()
 	ticker := time.NewTicker(c.interval())
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			c.pass.Lock()
+			defer c.pass.Unlock()
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if c.currentPort() != nil {
+				c.release(releaseCtx)
+			}
 			return
 		case <-ticker.C:
 		case <-c.triggered():
@@ -118,19 +122,33 @@ func (c *Controller) triggered() chan struct{} {
 	return c.trigger
 }
 
+// ErrOff means the phone network is off: no port is chosen.
+var ErrOff = errors.New("the phone network is off; choose its port under Admin → Phone network")
+
 // Reload re-applies the firewall now, for a changed assignment or profile.
 func (c *Controller) Reload(ctx context.Context) error {
 	c.pass.Lock()
 	defer c.pass.Unlock()
+	if c.currentPort() == nil {
+		if want, err := c.Ports.Get(ctx); err != nil {
+			return err
+		} else if want == nil {
+			return ErrOff
+		}
+	}
 	return c.applyFirewall(ctx, true)
 }
 
-// Pass finds phones on the LAN and re-applies the firewall.
+// Pass brings the port in line with the setting, finds phones on the LAN
+// and re-applies the firewall.
 func (c *Controller) Pass(ctx context.Context) {
 	c.pass.Lock()
 	defer c.pass.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
+	if !c.syncPort(ctx) {
+		return
+	}
 	if err := c.discover(ctx); err != nil {
 		c.Logger.Warn("lan: phone discovery failed", "error", err)
 	}
@@ -340,7 +358,20 @@ func (c *Controller) applyFirewall(ctx context.Context, force bool) error {
 	if same && !force {
 		return nil
 	}
-	err = c.Firewall.Apply(ctx, phones)
+	err = c.Firewall.Fence(ctx, phones)
+	if err != nil && c.currentPort() != nil {
+		// Fail closed: phones get nothing rather than a half-fenced router.
+		if downErr := c.Firewall.Down(ctx); downErr != nil {
+			c.Logger.Error("lan: couldn't take the phone network down after a firewall failure", "error", downErr)
+		}
+		err = fmt.Errorf("phone network firewall not installed (port taken down): %w", err)
+	}
+	c.mu.Lock()
+	wasDown := c.fwErr != nil
+	c.mu.Unlock()
+	if err == nil && wasDown && c.currentPort() != nil {
+		err = c.Firewall.Up(ctx) // fenced again: the port comes back
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err != nil && (c.fwErr == nil || c.fwErr.Error() != err.Error()) {

@@ -3,6 +3,7 @@ package lan
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -95,7 +96,8 @@ func Ruleset(iface string, n Network, phones []Phone) string {
 		"}\n"
 }
 
-// Firewall installs the LAN's routing fence and nftables table.
+// Firewall installs the LAN's routing fence and nftables table, and
+// configures the port.
 type Firewall struct {
 	Iface  string
 	Net    Network
@@ -103,42 +105,64 @@ type Firewall struct {
 	Logger *slog.Logger
 }
 
-// Apply fences the LAN for phones and then turns on forwarding. If any of
-// it fails the LAN interface is taken down, so the phones get nothing at
-// all rather than a half-configured router.
-func (f *Firewall) Apply(ctx context.Context, phones []Phone) error {
-	err := f.apply(ctx, phones)
-	if err != nil {
-		if _, downErr := f.cmd(ctx, "", "ip", "link", "set", f.Iface, "down"); downErr != nil {
-			f.Logger.Error("lan: couldn't take the phone LAN down after a failure", "error", downErr)
-		}
-		return fmt.Errorf("phone LAN firewall not installed (LAN taken down): %w", err)
-	}
-	return nil
-}
-
-func (f *Firewall) apply(ctx context.Context, phones []Phone) error {
-	out, err := f.cmd(ctx, "", "ip", "-4", "route", "show", "default")
-	if err != nil {
-		return err
-	}
-	if usesDevice(string(out), f.Iface) {
-		return fmt.Errorf("the container's default route goes through the phone LAN (%s): set gw_priority on the default network (Docker 28 or later)", strings.TrimSpace(string(out)))
-	}
+// Fence installs the routing catch-all, the nft table and the phones'
+// routes. They match the port by name, so they hold whether or not the NIC
+// is in Batter's namespace yet; Batter fences before it moves a NIC in.
+func (f *Firewall) Fence(ctx context.Context, phones []Phone) error {
 	if err := f.ensureCatchAll(ctx); err != nil {
 		return err
 	}
 	if _, err := f.cmd(ctx, Ruleset(f.Iface, f.Net, phones), "nft", "-f", "/dev/stdin"); err != nil {
 		return err
 	}
-	if err := f.syncRoutes(ctx, phones); err != nil {
+	return f.syncRoutes(ctx, phones)
+}
+
+// Up configures the port once it is in Batter's namespace and fenced: no
+// IPv6 (so Batter has no link-local address there), Batter's address, link
+// up, and only then forwarding.
+func (f *Firewall) Up(ctx context.Context) error {
+	if _, err := f.cmd(ctx, "", "sysctl", "-w", "net.ipv6.conf."+f.Iface+".disable_ipv6=1"); err != nil {
 		return err
 	}
-	if _, err := f.cmd(ctx, "", "ip", "link", "set", f.Iface, "up"); err != nil {
+	prefix := netip.PrefixFrom(f.Net.Addr, f.Net.Prefix.Bits()).String()
+	if _, err := f.cmd(ctx, "", "ip", "address", "replace", prefix, "dev", f.Iface); err != nil {
 		return err
 	}
-	_, err = f.cmd(ctx, "", "sysctl", "-w", "net.ipv4.ip_forward=1")
+	if _, err := f.cmd(ctx, "", "ip", "link", "set", "dev", f.Iface, "up"); err != nil {
+		return err
+	}
+	_, err := f.cmd(ctx, "", "sysctl", "-w", "net.ipv4.ip_forward=1")
 	return err
+}
+
+// Down takes the port down (fail closed after a fence failure).
+func (f *Firewall) Down(ctx context.Context) error {
+	_, err := f.cmd(ctx, "", "ip", "link", "set", "dev", f.Iface, "down")
+	return err
+}
+
+// Remove turns forwarding off and deletes the table and every LAN rule:
+// with the phone network off, Batter's namespace is as without it.
+func (f *Firewall) Remove(ctx context.Context) error {
+	var errs []error
+	if _, err := f.cmd(ctx, "", "sysctl", "-w", "net.ipv4.ip_forward=0"); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := f.cmd(ctx, "table inet batter_lan {}\ndelete table inet batter_lan\n", "nft", "-f", "/dev/stdin"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := f.syncRoutes(ctx, nil); err != nil {
+		errs = append(errs, err)
+	}
+	if out, err := f.cmd(ctx, "", "ip", "rule", "show", "priority", catchAllPriority); err != nil {
+		errs = append(errs, err)
+	} else if strings.Contains(string(out), "iif "+f.Iface+" unreachable") {
+		if _, err := f.cmd(ctx, "", "ip", "rule", "del", "iif", f.Iface, "unreachable", "priority", catchAllPriority); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // syncRoutes makes the phones' routing rules match phones: stale ones are
@@ -181,17 +205,6 @@ func (f *Firewall) syncRoutes(ctx context.Context, phones []Phone) error {
 	return nil
 }
 
-// usesDevice reports whether any route in `ip route` output goes out dev.
-func usesDevice(routes, dev string) bool {
-	f := strings.Fields(routes)
-	for i := 0; i+1 < len(f); i++ {
-		if f[i] == "dev" && f[i+1] == dev {
-			return true
-		}
-	}
-	return false
-}
-
 func (f *Firewall) ensureCatchAll(ctx context.Context) error {
 	out, err := f.cmd(ctx, "", "ip", "rule", "show", "priority", catchAllPriority)
 	if err != nil {
@@ -220,19 +233,18 @@ func (f *Firewall) cmd(ctx context.Context, stdin, name string, args ...string) 
 // runs it before starting the web app.
 const GuardSubcommand = "lan-guard"
 
-// Guard installs the LAN firewall with no phones allowed anywhere, on the
-// interface carrying addr. The container's start script runs it before
-// anything listens, so phones can't reach the web app or backend in the
-// seconds before Batter's controller takes over.
-func Guard(ctx context.Context, addr, pool string, run RunFunc, logger *slog.Logger) error {
-	n, err := ParseNetwork(addr, pool)
+// Guard fences the phone network's port with no phones allowed anywhere if
+// the port is already in Batter's namespace when the container starts (it
+// normally isn't: a stopped container's NIC returns to the box). Batter
+// itself fences before it moves a NIC in.
+func Guard(ctx context.Context, run RunFunc, logger *slog.Logger) error {
+	n, err := ParseNetwork(DefaultAddr, DefaultPool)
 	if err != nil {
 		return err
 	}
-	iface, err := FindInterface(n.Addr)
-	if err != nil {
-		return err
+	fw := &Firewall{Iface: Iface, Net: n, Run: run, Logger: logger}
+	if _, err := fw.cmd(ctx, "", "ip", "link", "show", "dev", Iface); err != nil {
+		return nil // no port: nothing to fence
 	}
-	fw := &Firewall{Iface: iface, Net: n, Run: run, Logger: logger}
-	return fw.Apply(ctx, nil)
+	return fw.Fence(ctx, nil)
 }

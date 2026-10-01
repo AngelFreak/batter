@@ -22,6 +22,7 @@ import (
 	"github.com/XpertaDK/batter/internal/api/handlers"
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
+	"github.com/XpertaDK/batter/internal/lan"
 	"github.com/XpertaDK/batter/internal/migrate"
 	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
@@ -64,6 +65,21 @@ func (l *fakeLAN) Reload(context.Context) error {
 }
 
 func (l *fakeLAN) Provision(context.Context, string) error { return l.err }
+
+func (l *fakeLAN) Status(context.Context) (lan.Status, error) {
+	return lan.Status{State: lan.StateOff, Clients: []lan.Client{}}, nil
+}
+
+func (l *fakeLAN) Interfaces(context.Context) ([]lan.HostNIC, error) {
+	return []lan.HostNIC{{Name: "enp2s0", MAC: "02:00:00:00:77:02", Usable: true}}, nil
+}
+
+func (l *fakeLAN) SetPort(_ context.Context, mac string) (lan.Status, error) {
+	if mac == "02:00:00:00:77:01" {
+		return lan.Status{}, &lan.PortError{}
+	}
+	return lan.Status{State: lan.StateActive, Clients: []lan.Client{}}, nil
+}
 
 func (l *fakeLAN) NeedsReprovision(string) (netip.Addr, bool) { return netip.Addr{}, false }
 
@@ -612,6 +628,35 @@ func TestDeletingAProfileTurnsItsPhonesOff(t *testing.T) {
 	}
 	if env.lan.reloaded() <= reloads {
 		t.Fatal("deleting the profile didn't reload the LAN's routing")
+	}
+}
+
+// Choosing the phone network's port moves a NIC away from the box: admins
+// only. An unusable port is refused with a 400.
+func TestPhoneNetworkRoutesAreAdminOnly(t *testing.T) {
+	env := newTestEnv(t)
+	for _, user := range []string{"operator", "viewer", "manager"} {
+		for _, rt := range []struct{ method, path, body string }{
+			{"GET", "/api/v1/phone-network", ""},
+			{"GET", "/api/v1/phone-network/interfaces", ""},
+			{"PUT", "/api/v1/phone-network", `{"mac":null}`},
+		} {
+			if w := env.do(t, user, rt.method, rt.path, rt.body); w.Code != http.StatusForbidden {
+				t.Errorf("%s %s as %s: %d, want 403", rt.method, rt.path, user, w.Code)
+			}
+		}
+	}
+	if w := env.do(t, "admin", "GET", "/api/v1/phone-network/interfaces", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "enp2s0") {
+		t.Fatalf("interfaces: %d %s", w.Code, w.Body.String())
+	}
+	if w := env.do(t, "admin", "PUT", "/api/v1/phone-network", `{"mac":"02:00:00:00:77:02"}`); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"active"`) {
+		t.Fatalf("set: %d %s", w.Code, w.Body.String())
+	}
+	if w := env.do(t, "admin", "PUT", "/api/v1/phone-network", `{"mac":"02:00:00:00:77:01"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("unusable port: %d %s", w.Code, w.Body.String())
+	}
+	if w := env.do(t, "admin", "PUT", "/api/v1/phone-network", `{}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("no mac: %d", w.Code)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -81,13 +82,12 @@ func main() {
 	}
 
 	// The phone network: phones on ethernet adapters, routed through their
-	// VPN profiles. Without it, phones are USB-only and have no internet.
-	var phoneLAN *lan.Controller
-	if cfg.PhoneLAN != "" {
-		phoneLAN, err = newPhoneLAN(cfg, db, dm, vpnSvc, logger.With("component", "lan"))
-		if err != nil {
-			logger.Error("phone network unavailable", "error", err)
-		}
+	// VPN profiles, on the box NIC an admin picks (off until then). USB
+	// phones are controlled only; they get no internet.
+	phoneLAN, err := newPhoneLAN(cfg, db, dm, vpnSvc, logger.With("component", "lan"))
+	if err != nil {
+		logger.Error("invalid phone network addressing", "error", err)
+		os.Exit(1)
 	}
 
 	// Initialize JWT manager
@@ -102,9 +102,7 @@ func main() {
 		AllowedOrigins: cfg.AllowedOrigins,
 		TrustedProxies: cfg.TrustedProxies,
 		VPN:            vpnSvc,
-	}
-	if phoneLAN != nil {
-		routerCfg.LAN = phoneLAN
+		LAN:            phoneLAN,
 	}
 	router, err := api.NewRouter(routerCfg)
 	if err != nil {
@@ -124,13 +122,14 @@ func main() {
 		logger.Error("failed to apply VPN profiles", "error", err)
 	}
 
-	// The phone LAN's firewall goes in (profiles' tables are in by now)
-	// before its DHCP server hands out addresses.
+	// The phone network takes its port (profiles' tables are in by now),
+	// fencing it before the NIC arrives. On shutdown it gives the NIC back.
 	lanCtx, stopLAN := context.WithCancel(context.Background())
-	defer stopLAN()
-	if phoneLAN != nil {
-		go phoneLAN.Run(lanCtx)
-	}
+	lanDone := make(chan struct{})
+	go func() {
+		defer close(lanDone)
+		phoneLAN.Run(lanCtx)
+	}()
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -149,6 +148,7 @@ func main() {
 	// sessions, then the DB pool that in-flight handlers were still using.
 	logger.Info("shutting down...")
 	stopLAN()
+	<-lanDone
 	stopHealthCheck()
 	dm.Shutdown()
 	db.Close()
@@ -160,40 +160,42 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-// newPhoneLAN sets up the phone network's controller on the interface that
-// carries Batter's LAN address.
+// newPhoneLAN sets up the phone network's controller. It reaches the box's
+// NICs through the box's network namespace (the container runs with pid:
+// host); without that the network is reported unavailable.
 func newPhoneLAN(cfg *config.Config, db *pgxpool.Pool, dm *device.Manager, vpnSvc *vpn.Service, logger *slog.Logger) (*lan.Controller, error) {
-	n, err := lan.ParseNetwork(cfg.PhoneLAN, cfg.PhoneLANPool)
+	n, err := lan.ParseNetwork(cmp.Or(cfg.PhoneLAN, lan.DefaultAddr), cmp.Or(cfg.PhoneLANPool, defaultPool(cfg)))
 	if err != nil {
 		return nil, err
 	}
-	iface, err := lan.FindInterface(n.Addr)
-	if err != nil {
-		return nil, err
-	}
-	logger.Info("phone network", "iface", iface, "address", cfg.PhoneLAN, "pool", n.PoolStart.String()+"-"+n.PoolEnd.String())
 	return &lan.Controller{
-		Iface:    iface,
 		Net:      n,
 		Leases:   &lan.Leases{DB: db, Net: n},
-		Firewall: &lan.Firewall{Iface: iface, Net: n, Logger: logger},
+		Ports:    &lan.PortSetting{DB: db},
+		Host:     &lan.HostNet{NS: "/proc/1/ns/net", PID: os.Getpid(), AllowVeth: lan.AllowVethFromEnv()},
+		Firewall: &lan.Firewall{Iface: lan.Iface, Net: n, Logger: logger},
 		ADB:      dm.ADB(),
 		Profiles: vpnSvc,
 		Logger:   logger,
 	}, nil
 }
 
-// lanGuard fences the phone LAN (if configured) before the web app and
-// backend listen; see lan.Guard.
-func lanGuard() int {
-	addr := os.Getenv("PHONE_LAN")
-	if addr == "" {
-		return 0
+// defaultPool is the default DHCP pool for the default address; a custom
+// PHONE_LAN without PHONE_LAN_POOL gets the upper half of its subnet.
+func defaultPool(cfg *config.Config) string {
+	if cfg.PhoneLAN == "" {
+		return lan.DefaultPool
 	}
+	return ""
+}
+
+// lanGuard fences the phone network's port if it is already in Batter's
+// namespace when the container starts; see lan.Guard.
+func lanGuard() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := lan.Guard(ctx, addr, os.Getenv("PHONE_LAN_POOL"), nil, logger); err != nil {
+	if err := lan.Guard(ctx, nil, logger); err != nil {
 		logger.Error("phone network not fenced", "error", err)
 		return 1
 	}

@@ -61,6 +61,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	userGroupHandler := handlers.NewUserGroupHandler(cfg.DB, cfg.Logger)
 	tetherHandler := handlers.NewTetherHandler(cfg.DB, cfg.LAN, cfg.VPN, cfg.Logger)
 	vpnHandler := handlers.NewVPNHandler(cfg.VPN, cfg.LAN, cfg.Logger)
+	phoneNetHandler := handlers.NewPhoneNetworkHandler(cfg.LAN, cfg.Logger)
 
 	// API v1
 	v1 := r.Group("/api/v1")
@@ -180,6 +181,16 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 				vpnRoutes.PUT("/:id", vpnHandler.UpdateProfile)
 				vpnRoutes.DELETE("/:id", vpnHandler.DeleteProfile)
 				vpnRoutes.POST("/:id/check", vpnHandler.CheckExitIP)
+			}
+
+			// The phone network: which of the box's network ports it uses
+			// (admin only; it moves a NIC away from the box).
+			phoneNet := protected.Group("/phone-network")
+			phoneNet.Use(middleware.RequireRole("admin"))
+			{
+				phoneNet.GET("", phoneNetHandler.Status)
+				phoneNet.GET("/interfaces", phoneNetHandler.Interfaces)
+				phoneNet.PUT("", phoneNetHandler.SetPort)
 			}
 
 			// User groups / teams (admin only)

@@ -27,7 +27,7 @@ import (
 type recordingSystem struct {
 	mu     sync.Mutex
 	rules  string
-	routes map[string]bool // "from <ip> iif eth1 lookup <table>"
+	routes map[string]bool // "from <ip> iif phonelan lookup <table>"
 }
 
 func (s *recordingSystem) run(_ context.Context, stdin, name string, args ...string) ([]byte, error) {
@@ -75,8 +75,59 @@ func (s *recordingSystem) routed() []string {
 type lanEnv struct {
 	*testEnv
 	ctl   *lan.Controller
+	host  *boxNICs
 	sys   *recordingSystem
 	state string
+}
+
+const boxNICMAC = "02:00:00:00:77:02"
+
+// boxNICs is the box with one free NIC for the phone network.
+type boxNICs struct {
+	mu     sync.Mutex
+	nic    lan.HostNIC
+	inside bool
+}
+
+func (b *boxNICs) Available() error { return nil }
+
+func (b *boxNICs) List(context.Context) ([]lan.HostNIC, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.inside {
+		return nil, nil
+	}
+	return []lan.HostNIC{b.nic}, nil
+}
+
+func (b *boxNICs) Find(ctx context.Context, mac string) (lan.HostNIC, bool, error) {
+	nics, _ := b.List(ctx)
+	for _, n := range nics {
+		if n.MAC == mac {
+			return n, true, nil
+		}
+	}
+	return lan.HostNIC{}, false, nil
+}
+
+func (b *boxNICs) Adopt(context.Context, string) (lan.HostNIC, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.inside = true
+	return b.nic, nil
+}
+
+func (b *boxNICs) Release(context.Context, string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.inside = false
+	return nil
+}
+
+func (b *boxNICs) Present(context.Context) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.inside
 }
 
 // newLANEnv wires a real lan.Controller into the router. The fake phone's
@@ -91,11 +142,13 @@ func newLANEnv(t *testing.T) *lanEnv {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	e.testEnv = newTestEnv(t, func(s *envSetup) {
+		e.host = &boxNICs{nic: lan.HostNIC{Name: "enp2s0", MAC: boxNICMAC, Usable: true}}
 		e.ctl = &lan.Controller{
-			Iface:    "eth1",
 			Net:      n,
 			Leases:   &lan.Leases{DB: s.db, Net: n},
-			Firewall: &lan.Firewall{Iface: "eth1", Net: n, Run: e.sys.run, Logger: logger},
+			Ports:    &lan.PortSetting{DB: s.db},
+			Host:     e.host,
+			Firewall: &lan.Firewall{Iface: lan.Iface, Net: n, Run: e.sys.run, Logger: logger},
 			ADB:      s.dm.ADB(),
 			Profiles: s.vpn,
 			Logger:   logger,
@@ -193,6 +246,12 @@ func TestPhoneMovesFromUSBToTheLANAndBack(t *testing.T) {
 	ctx := context.Background()
 	const mac = "02:00:00:00:00:0a"
 
+	// The admin turns the phone network on, on the box's free NIC.
+	if w := e.do(t, "admin", "PUT", "/api/v1/phone-network", `{"mac":"`+boxNICMAC+`"}`); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), `"state":"active"`) {
+		t.Fatalf("turn the phone network on: %d %s", w.Code, w.Body.String())
+	}
+	defer func() { _, _ = e.ctl.SetPort(context.Background(), "") }()
 	if w := e.do(t, "admin", "POST", "/api/v1/devices", `{"serial":"`+fakeSerial+`"}`); w.Code != http.StatusCreated {
 		t.Fatalf("register: %d", w.Code)
 	}
@@ -248,11 +307,11 @@ func TestPhoneMovesFromUSBToTheLANAndBack(t *testing.T) {
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "apply_error") {
 		t.Fatalf("assign: %d %s", w.Code, w.Body.String())
 	}
-	want := `iifname "eth1" oifname "wg*" ip saddr 10.77.0.100 ether saddr ` + mac + ` accept`
+	want := `iifname "phonelan" oifname "wg*" ip saddr 10.77.0.100 ether saddr ` + mac + ` accept`
 	if rules := e.sys.ruleset(); !strings.Contains(rules, want) || !strings.Contains(rules, "dnat ip to 10.64.0.1") {
 		t.Fatalf("assignment didn't let the phone's adapter into its profile's tunnel:\n%s", rules)
 	}
-	if got := e.sys.routed(); len(got) != 1 || got[0] != "from 10.77.0.100 iif eth1 lookup 51820" {
+	if got := e.sys.routed(); len(got) != 1 || got[0] != "from 10.77.0.100 iif phonelan lookup 51820" {
 		t.Fatalf("phone's routes: %v", got)
 	}
 	if w := e.do(t, "admin", "PUT", "/api/v1/devices/"+fakeSerial+"/tether", `{"profile_id":null}`); w.Code != http.StatusOK {

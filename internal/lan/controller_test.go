@@ -92,16 +92,35 @@ func (p fixedProfiles) Assignments(context.Context) (map[string]vpn.Assignment, 
 	return p, nil
 }
 
+// newController returns a controller whose phone network is on, its port
+// (nic2) waiting on the fake box.
 func newController(t *testing.T, adb *fakeADB, profiles fixedProfiles) (*Controller, *fakeSystem) {
+	t.Helper()
+	c, sys, _ := newControllerOn(t, adb, profiles, nic2)
+	return c, sys
+}
+
+func newControllerOn(t *testing.T, adb *fakeADB, profiles fixedProfiles, nics ...HostNIC) (*Controller, *fakeSystem, *fakeHost) {
 	t.Helper()
 	db := testDB(t)
 	n := testNet(t, "10.77.0.100-10.77.0.200")
-	sys := &fakeSystem{out: map[string]string{"ip -4 route show default": "default via 172.20.0.1 dev eth0\n"}}
+	sys := &fakeSystem{}
+	host := &fakeHost{nics: map[string]HostNIC{}}
+	for _, nic := range nics {
+		host.nics[nic.MAC] = nic
+	}
+	ports := &PortSetting{DB: db}
+	if len(nics) > 0 {
+		if err := ports.Set(context.Background(), Port{MAC: nics[0].MAC, Name: nics[0].Name}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	c := &Controller{
-		Iface:    "eth1",
 		Net:      n,
 		Leases:   &Leases{DB: db, Net: n},
-		Firewall: &Firewall{Iface: "eth1", Net: n, Run: sys.run, Logger: quiet},
+		Ports:    ports,
+		Host:     host,
+		Firewall: &Firewall{Iface: Iface, Net: n, Run: sys.run, Logger: quiet},
 		ADB:      adb,
 		Profiles: profiles,
 		Logger:   quiet,
@@ -114,7 +133,7 @@ func newController(t *testing.T, adb *fakeADB, profiles fixedProfiles) (*Control
 			return &net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}
 		},
 	}
-	return c, sys
+	return c, sys, host
 }
 
 // An adapter moved to another phone: the address is re-identified and the
@@ -131,7 +150,7 @@ func TestAnAdapterMovedToAnotherPhoneIsReidentified(t *testing.T) {
 	if got := adb.transport("PHONE1"); got != "10.77.0.100:5555" {
 		t.Fatalf("PHONE1 transport %q", got)
 	}
-	sys.index(t, "ip rule add from 10.77.0.100 iif eth1 lookup 51820")
+	sys.index(t, "ip rule add from 10.77.0.100 iif phonelan lookup 51820")
 
 	// The adapter now sits on PHONE2 (its adb dropped and reconnects).
 	_ = adb.Disconnect(ctx, "10.77.0.100:5555")
@@ -150,7 +169,7 @@ func TestAnAdapterMovedToAnotherPhoneIsReidentified(t *testing.T) {
 		t.Fatalf("lease bound to %q", l.Serial)
 	}
 	// (The fake `ip rule show` lists nothing, so only the add shows.)
-	sys.index(t, "ip rule add from 10.77.0.100 iif eth1 lookup 51821")
+	sys.index(t, "ip rule add from 10.77.0.100 iif phonelan lookup 51821")
 }
 
 // A phone already connected isn't asked for its serial again every pass.
@@ -202,13 +221,14 @@ func TestFirewallIsReappliedOnlyWhenNeeded(t *testing.T) {
 		}
 		return n
 	}
-	if n := count(); n != 1 {
+	// Taking the port fences it, and the pass applies once more.
+	if n := count(); n != 2 {
 		t.Fatalf("%d nft loads for an unchanged ruleset", n)
 	}
 	if err := c.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n := count(); n != 2 {
+	if n := count(); n != 3 {
 		t.Fatal("Reload didn't apply")
 	}
 }
