@@ -45,7 +45,6 @@ import (
 )
 
 const (
-	project = "batter-vpn-it"
 	echoURL = "http://echo/cgi-bin/ip"
 	// Exit-IP checker uids of the first two profile slots (31416 + slot).
 	uidA = "31416"
@@ -56,6 +55,9 @@ func TestVPNProfiles(t *testing.T) {
 	if os.Getenv("BATTER_DOCKER_IT") != "1" {
 		t.Skip("set BATTER_DOCKER_IT=1 to run the Docker integration test")
 	}
+	// A per-run compose project: concurrent runs never share resources, and
+	// `compose down` removes only this run's.
+	project := fmt.Sprintf("batter-vpn-it-%d", time.Now().UnixNano()%1_000_000_000)
 	_, file, _, _ := runtime.Caller(0)
 	dir := filepath.Dir(file)
 	repo := filepath.Join(dir, "..", "..")

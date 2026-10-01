@@ -37,15 +37,14 @@ import (
 	ws "github.com/gorilla/websocket"
 )
 
-const (
-	network = "batter-proxyit-net"
-	dind    = "batter-proxyit-dind"
-)
-
 func TestCaddyRoutesAPIAndWebSocketsStraightToGo(t *testing.T) {
 	if os.Getenv("BATTER_DOCKER_IT") != "1" {
 		t.Skip("set BATTER_DOCKER_IT=1 to run the Docker integration test")
 	}
+	// Per-run names: concurrent runs never share resources, and cleanup
+	// removes only this run's.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000_000)
+	network, dind := "batter-proxyit-"+suffix+"-net", "batter-proxyit-"+suffix+"-dind"
 	_, file, _, _ := runtime.Caller(0)
 	repo := filepath.Join(filepath.Dir(file), "..", "..")
 
@@ -126,7 +125,9 @@ func TestCaddyRoutesAPIAndWebSocketsStraightToGo(t *testing.T) {
 	})
 
 	// From here on nothing can go through Next.js's proxy.
-	compose(time.Minute, "exec", "-T", "batter", "pkill", "-f", "next-server")
+	// Anchored: under pid: host the container sees the box's processes too,
+	// including this very `docker compose exec` command line.
+	compose(time.Minute, "exec", "-T", "batter", "pkill", "-f", "^next-server")
 	waitFor(t, 30*time.Second, "Next.js to stop", func() bool {
 		code, _ := c.try("GET", "/", nil)
 		return code == http.StatusBadGateway
