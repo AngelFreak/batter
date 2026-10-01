@@ -658,3 +658,66 @@ export async function revokeUserGroupAccess(id: string, accessId: string) {
   if (!res.ok) throw new Error('Failed to revoke access');
   return res.json();
 }
+
+// VPN (admin): the WireGuard tunnel tethered devices' traffic goes through.
+// The server never returns the config's private or preshared keys.
+export interface VPNInfo {
+  configured: boolean;
+  enabled: boolean;
+  config?: {
+    public_key: string;
+    addresses: string[];
+    dns: string[] | null;
+    mtu?: number;
+    peers: {
+      public_key: string;
+      has_preshared_key: boolean;
+      endpoint: string;
+      allowed_ips: string[];
+      persistent_keepalive?: number;
+    }[];
+  };
+  status?: {
+    up: boolean;
+    peers: {
+      public_key: string;
+      endpoint?: string;
+      latest_handshake?: string;
+      rx_bytes: number;
+      tx_bytes: number;
+    }[];
+  };
+  apply_error?: string;
+}
+
+async function vpnRequest(method: string, path: string, body?: unknown): Promise<VPNInfo> {
+  const res = await fetchWithAuth(`/api/v1/vpn${path}`, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'VPN request failed');
+  return data;
+}
+
+export function getVPN(): Promise<VPNInfo> {
+  return vpnRequest('GET', '');
+}
+
+// Saves a pasted wg-quick config (omit it to only switch the VPN on/off).
+export function setVPN(enabled: boolean, config?: string): Promise<VPNInfo> {
+  return vpnRequest('PUT', '', config ? { enabled, config } : { enabled });
+}
+
+export function deleteVPN(): Promise<VPNInfo> {
+  return vpnRequest('DELETE', '');
+}
+
+// Where tethered devices' traffic currently exits; error if it can't get out
+// (with the VPN on, that's the kill switch holding while the tunnel is down).
+export async function checkVPNExitIP(): Promise<{ exit_ip?: string; error?: string }> {
+  const res = await fetchWithAuth('/api/v1/vpn/check', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Exit IP check failed');
+  return data;
+}

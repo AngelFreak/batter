@@ -33,6 +33,9 @@ type Config struct {
 	// Reverse tethering (gnirehtet). Disabled if the binary is missing.
 	GnirehtetPath string
 	GnirehtetAPK  string
+	// VPNExitIPURL answers with the caller's public IP (plain text); used to
+	// check where tethered traffic exits.
+	VPNExitIPURL string
 
 	// Auth
 	JWTSecret     string
@@ -56,6 +59,7 @@ func Load() (*Config, error) {
 		ScrcpyVersion:    getEnv("SCRCPY_VERSION", "3.3.4"),
 		GnirehtetPath:    getEnv("GNIREHTET_PATH", "/usr/local/bin/gnirehtet"),
 		GnirehtetAPK:     getEnv("GNIREHTET_APK", "/usr/local/share/gnirehtet/gnirehtet.apk"),
+		VPNExitIPURL:     getEnv("VPN_EXIT_IP_URL", "https://api.ipify.org"),
 		JWTSecret:        getEnv("JWT_SECRET", ""),
 		DataDir:          getEnv("DATA_DIR", "./data"),
 		JWTExpirySecs:    getEnvInt("JWT_EXPIRY_SECS", 3600),

@@ -1,0 +1,52 @@
+# Throwaway network for the VPN integration test (vpn_test.go): a WireGuard
+# server that NATs to the "internet" (this network), a server that echoes the
+# caller's IP, and Batter. Nothing here touches USB or real devices.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: batter
+      POSTGRES_PASSWORD: batter
+      POSTGRES_DB: batter
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U batter"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  echo:
+    image: busybox:1.36-musl
+    command: ["httpd", "-f", "-p", "80", "-h", "/www"]
+    volumes:
+      - ./echo-ip.cgi:/www/cgi-bin/ip:ro
+
+  wgserver:
+    image: alpine:3.20
+    privileged: true
+    environment:
+      SERVER_KEY: ${SERVER_KEY:?}
+      CLIENT_PUB: ${CLIENT_PUB:?}
+    volumes:
+      - ./wgserver.sh:/wgserver.sh:ro
+    command: ["sh", "/wgserver.sh"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/ready"]
+      interval: 2s
+      retries: 60
+
+  batter:
+    image: ${BATTER_IMAGE:-batter-vpn-it:latest}
+    privileged: true
+    environment:
+      DATABASE_URL: postgres://batter:batter@postgres:5432/batter?sslmode=disable
+      JWT_SECRET: vpn-it-secret
+      VPN_EXIT_IP_URL: http://echo/cgi-bin/ip
+    ports:
+      - "127.0.0.1::8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      echo:
+        condition: service_started
+      wgserver:
+        condition: service_healthy

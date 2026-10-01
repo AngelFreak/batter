@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/XpertaDK/batter/internal/vpn"
 )
 
 func TestNewHTTPServerTimeouts(t *testing.T) {
@@ -68,5 +72,26 @@ func TestServeDrainsInFlightRequestOnShutdown(t *testing.T) {
 	}
 	if _, err := http.Get("http://" + ln.Addr().String()); err == nil {
 		t.Fatal("server still accepting connections after shutdown")
+	}
+}
+
+func TestTetheredDevicesGetTheVPNsDNS(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	vpnMgr := &vpn.Manager{
+		Path:   filepath.Join(t.TempDir(), "wireguard.json"),
+		Run:    func(context.Context, string, string, ...string) ([]byte, error) { return nil, nil },
+		Logger: logger,
+	}
+	ctl := newTetherController(nil, "/apk", vpnMgr, logger)
+	if dns := ctl.DNS(); dns != nil {
+		t.Fatalf("DNS = %v with no VPN, want gnirehtet's default", dns)
+	}
+	conf := "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.64.0.2/32\nDNS = 10.64.0.1\n" +
+		"[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nEndpoint = vpn.example.net:51820\nAllowedIPs = 0.0.0.0/0\n"
+	if err := vpnMgr.Set(context.Background(), conf, true); err != nil {
+		t.Fatal(err)
+	}
+	if dns := ctl.DNS(); len(dns) != 1 || dns[0] != "10.64.0.1" {
+		t.Fatalf("DNS = %v, want the VPN's 10.64.0.1", dns)
 	}
 }

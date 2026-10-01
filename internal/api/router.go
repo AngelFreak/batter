@@ -10,6 +10,7 @@ import (
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/XpertaDK/batter/internal/tether"
+	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -25,6 +26,8 @@ type RouterConfig struct {
 	TrustedProxies []string
 	// Tether drives per-device reverse tethering; nil if unavailable.
 	Tether *tether.Controller
+	// VPN manages the tethered devices' WireGuard tunnel; nil if unavailable.
+	VPN *vpn.Manager
 }
 
 // NewRouter creates and configures the Gin router with all routes.
@@ -58,6 +61,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	groupHandler := handlers.NewGroupHandler(cfg.DB, cfg.DeviceManager, cfg.Logger)
 	userGroupHandler := handlers.NewUserGroupHandler(cfg.DB, cfg.Logger)
 	tetherHandler := handlers.NewTetherHandler(cfg.DB, cfg.Tether, cfg.Logger)
+	vpnHandler := handlers.NewVPNHandler(cfg.VPN, cfg.Logger)
 
 	// API v1
 	v1 := r.Group("/api/v1")
@@ -160,6 +164,17 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 				users.POST("/:id/devices", userHandler.GrantAccess)
 				users.DELETE("/:id/devices/:accessId", userHandler.RevokeUserAccess)
 				users.PUT("/:id/password", userHandler.ResetPassword)
+			}
+
+			// WireGuard for tethered devices (admin only): it holds a private
+			// key and decides where every tethered phone's traffic exits.
+			vpnRoutes := protected.Group("/vpn")
+			vpnRoutes.Use(middleware.RequireRole("admin"))
+			{
+				vpnRoutes.GET("", vpnHandler.GetVPN)
+				vpnRoutes.PUT("", vpnHandler.SetVPN)
+				vpnRoutes.DELETE("", vpnHandler.DeleteVPN)
+				vpnRoutes.POST("/check", vpnHandler.CheckExitIP)
 			}
 
 			// User groups / teams (admin only)

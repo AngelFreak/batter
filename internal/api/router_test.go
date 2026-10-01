@@ -22,6 +22,7 @@ import (
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/XpertaDK/batter/internal/migrate"
 	"github.com/XpertaDK/batter/internal/tether"
+	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -72,6 +73,13 @@ func newTestEnv(t *testing.T) *testEnv {
 		JWTManager:    env.jwt,
 		Logger:        logger,
 		Tether:        &tether.Controller{ADB: dm.ADB(), APK: "/nonexistent/gnirehtet.apk", Logger: logger},
+		// Never touch the test machine's network.
+		VPN: &vpn.Manager{
+			Path:   filepath.Join(t.TempDir(), "wireguard.json"),
+			UID:    tether.RelayUID,
+			Run:    func(context.Context, string, string, ...string) ([]byte, error) { return nil, nil },
+			Logger: logger,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -463,5 +471,88 @@ func TestTetherToggleNeedsManageAndPersists(t *testing.T) {
 
 	if w := env.do(t, "admin", "PUT", "/api/v1/devices/NOSUCHDEVICE/tether", `{"enabled":true}`); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown device: status %d, want 404", w.Code)
+	}
+}
+
+// Throwaway WireGuard keys for the VPN tests.
+const (
+	vpnTestPriv = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+	vpnTestPeer = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
+)
+
+var vpnTestConfig = `[Interface]
+PrivateKey = ` + vpnTestPriv + `
+Address = 10.64.0.2/32
+DNS = 10.64.0.1
+
+[Peer]
+PublicKey = ` + vpnTestPeer + `
+Endpoint = vpn.example.net:51820
+AllowedIPs = 0.0.0.0/0
+`
+
+func TestVPNRoutesAreAdminOnly(t *testing.T) {
+	env := newTestEnv(t)
+	body, _ := json.Marshal(map[string]any{"config": vpnTestConfig, "enabled": true})
+	routes := []struct{ method, path, body string }{
+		{"GET", "/api/v1/vpn", ""},
+		{"PUT", "/api/v1/vpn", string(body)},
+		{"POST", "/api/v1/vpn/check", ""},
+		{"DELETE", "/api/v1/vpn", ""},
+	}
+	for _, rt := range routes {
+		for _, user := range []string{"viewer", "manager", "operator"} {
+			if w := env.do(t, user, rt.method, rt.path, rt.body); w.Code != http.StatusForbidden {
+				t.Errorf("%s %s as %s: status %d, want 403", rt.method, rt.path, user, w.Code)
+			}
+		}
+		if w := env.do(t, "admin", rt.method, rt.path, rt.body); w.Code == http.StatusForbidden || w.Code == http.StatusNotFound {
+			t.Errorf("%s %s as admin: status %d", rt.method, rt.path, w.Code)
+		}
+	}
+}
+
+func TestVPNConfigNeverReturnsPrivateKey(t *testing.T) {
+	env := newTestEnv(t)
+	body, _ := json.Marshal(map[string]any{"config": vpnTestConfig, "enabled": true})
+
+	w := env.do(t, "admin", "PUT", "/api/v1/vpn", string(body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT: status %d; body: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), vpnTestPriv) {
+		t.Fatalf("PUT response contains the private key: %s", w.Body.String())
+	}
+
+	w = env.do(t, "admin", "GET", "/api/v1/vpn", "")
+	if strings.Contains(w.Body.String(), vpnTestPriv) {
+		t.Fatalf("GET response contains the private key: %s", w.Body.String())
+	}
+	var info struct {
+		Configured bool `json:"configured"`
+		Enabled    bool `json:"enabled"`
+		Config     struct {
+			PublicKey string `json:"public_key"`
+			Peers     []struct {
+				Endpoint string `json:"endpoint"`
+			} `json:"peers"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if !info.Configured || !info.Enabled || info.Config.PublicKey == "" ||
+		len(info.Config.Peers) != 1 || info.Config.Peers[0].Endpoint != "vpn.example.net:51820" {
+		t.Fatalf("GET doesn't describe the saved config: %s", w.Body.String())
+	}
+
+	// Toggling doesn't need the config (and its key) sent again.
+	if w := env.do(t, "admin", "PUT", "/api/v1/vpn", `{"enabled":false}`); w.Code != http.StatusOK {
+		t.Fatalf("toggle: status %d; body: %s", w.Code, w.Body.String())
+	}
+
+	bad, _ := json.Marshal(map[string]any{"config": "[Interface]\nPostUp = echo hi\n", "enabled": true})
+	if w := env.do(t, "admin", "PUT", "/api/v1/vpn", string(bad)); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid config: status %d, want 400", w.Code)
 	}
 }

@@ -1,4 +1,4 @@
-.PHONY: build run test dev db-up db-down clean
+.PHONY: build run test test-vpn dev db-up db-down clean
 
 BINARY=batter
 GO=go
@@ -11,6 +11,11 @@ run: build
 
 test:
 	$(GO) test ./... -v
+
+# Docker integration test of the tethering VPN (builds the image; needs
+# kernel WireGuard). See test/vpnit/vpn_test.go.
+test-vpn:
+	BATTER_DOCKER_IT=1 $(GO) test ./test/vpnit/ -v -count=1 -timeout 60m
 
 dev:
 	$(GO) run ./cmd/batter
