@@ -52,6 +52,11 @@ COPY <<'EOF' /app/start.sh
 #!/bin/sh
 set -e
 
+# Fence the phone network (if there is one) before anything listens: no
+# phone may reach the web app or backend, even while Batter starts. If it
+# can't be fenced, the phone network is taken down instead.
+/app/batter lan-guard || echo "phone network down until Batter can fence it" >&2
+
 # Start Next.js frontend on port 3000
 cd /app/web && PORT=3000 HOSTNAME=0.0.0.0 node server.js &
 

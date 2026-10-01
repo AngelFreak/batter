@@ -105,7 +105,96 @@ from the box itself; everything else goes through HTTPS on port 443 (port 80
 redirects to it). Caddy sends API and live-video requests straight to port
 8080 and the rest to 3000.
 
-## 7. Day-to-day
+## 7. Phone network (ethernet)
+
+Phones can be given internet through a VPN, and only through it, over a
+wired network instead of USB. Each phone gets a USB-C ethernet adapter;
+the adapters go into a switch plugged into a **second network card** of the
+box (NIC2). Batter is that network's DHCP server and router: Android sees a
+real ethernet connection (so apps work in airplane mode too), and Batter
+lets each phone out only through the WireGuard tunnel of the VPN profile
+chosen for it under **Edit Device → Internet**.
+
+What each phone can reach:
+
+| Phone has | It reaches |
+|---|---|
+| No VPN profile | Nothing (only DHCP from Batter). |
+| A profile | The internet through that profile's tunnel, DNS included (queries go to the profile's `DNS =` server). |
+| A profile whose tunnel is down or disabled | Nothing: there is no direct fallback. |
+
+Never reachable from a phone: Batter's web app and API, the database, the
+box itself, the box's own LAN (NIC1) or the internet directly. IPv6 is not
+offered or forwarded. Batter's own connections to the phones (adb) work.
+
+### What you need
+
+- **Adapters:** USB-C ethernet with power pass-through (USB PD), so the
+  phone charges while wired. RTL8153-based ones (e.g. RTL8153B) work with
+  Android's built-in drivers.
+- **A switch** for the adapters, plugged into NIC2. Use one with **port
+  isolation** (also called "protected ports" or "private VLAN edge"): mark
+  every phone port isolated and leave the port to the box unisolated. See
+  [what Batter can't enforce](#what-batter-cant-enforce).
+- **NIC2 without an address on the box:** no DHCP client or NetworkManager
+  profile may configure it (only the container uses it). For example, with
+  NetworkManager: `sudo nmcli device set enp2s0 managed no && sudo ip link set enp2s0 up`.
+- **Docker 28 or later** (the phone network needs `gw_priority` to keep the
+  container's own traffic off it; Batter refuses to route phones otherwise).
+
+### Turn it on
+
+Add to `.env` (NIC2's name from `ip link`):
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.lan.yml
+PHONE_LAN_PARENT=enp2s0
+```
+
+then `docker compose up -d`. The phone network is `10.77.0.0/24`: Batter is
+`10.77.0.1`, phones get `10.77.0.100`-`10.77.0.250`, and each adapter keeps
+its address for good. If that subnet is used elsewhere on your network, change
+it in `docker-compose.lan.yml` (`PHONE_LAN`, `PHONE_LAN_POOL`, the subnet,
+`ip_range`, `gateway` and `ipv4_address` together).
+
+Give each VPN profile a `DNS =` line (**Admin → VPN**): the phones' DNS
+queries go to that server, through the tunnel.
+
+### Move a phone to ethernet
+
+1. Add the phone as usual over USB (**Add Device**), or open an existing
+   one's **Edit Device**.
+2. At the **Ethernet** step (or in Edit Device) click **Switch to
+   ethernet** while the phone is still on USB. This turns on adb over the
+   network (port 5555) and removes the old reverse-tethering app.
+3. Unplug USB, plug in the adapter (with its power supply). Within a few
+   seconds Batter finds the phone on the network and shows it as
+   **Ethernet · 10.77.0.x**. Everything (live view, audio, files, APKs,
+   screen lock) works as on USB.
+4. Choose its VPN profile under **Edit Device → Internet**.
+
+**After a phone restarts**, Android turns adb over the network off again.
+The phone keeps its network and VPN, but Batter can't control it and shows
+**Needs USB re-provision**: plug it into USB, click **Switch to ethernet**
+in Edit Device, and put the adapter back. A phone on USB is always
+controllable over USB.
+
+### What Batter can't enforce
+
+Batter controls everything that passes through it, but phones on the same
+switch can also talk to **each other directly** (layer 2), without passing
+Batter. Batter can't see or stop that; only the switch can. With port
+isolation each phone port can talk only to the box's port, so phones can't
+reach each other at all. Without it, a phone could reach another phone's
+open ports, or pose as another phone's adapter (same MAC and address) to use
+that phone's VPN profile.
+
+Batter does stop: a device on the switch borrowing another phone's address
+(each phone's traffic must come from its own adapter's MAC), devices with
+an unknown or no profile getting anywhere, and any phone reaching Batter,
+the box or anything else except through its tunnel.
+
+## 8. Day-to-day
 
 ```bash
 docker compose logs -f batter     # follow logs
@@ -149,7 +238,7 @@ The other volumes rebuild themselves if lost: `batter_data` (screenshot cache
 and the login-token secret — losing it just logs everyone out) and `adb_keys`
 (phones ask to **Allow USB debugging** once more).
 
-## 8. Optional settings
+## 9. Optional settings
 
 Everything has a working default; see [`.env.example`](../.env.example) for the
 full list. The ones you might touch:
@@ -173,7 +262,7 @@ persists across reboots):
 echo "net.ipv4.tcp_notsent_lowat = 131072" | sudo tee /etc/sysctl.d/90-batter-latency.conf && sudo sysctl -p /etc/sysctl.d/90-batter-latency.conf
 ```
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Problem | Fix |
 |---|---|
@@ -185,3 +274,7 @@ echo "net.ipv4.tcp_notsent_lowat = 131072" | sudo tee /etc/sysctl.d/90-batter-la
 | HTTPS doesn't load | Ports 80 and 443 must be free on the box: `sudo ss -ltnp 'sport = :443'`. Check `docker compose logs caddy`. |
 | Pages load but nothing works (API errors 502) | Port 8080 on the box may be taken by something else: `sudo ss -ltnp 'sport = :8080'`. Set `BATTER_API_PORT` to a free port in `.env` and `docker compose up -d`. |
 | `batter` container isn't `healthy` | `docker compose logs batter` — a database or migration error is printed at startup. |
+| Phone on ethernet gets no address | Check the adapter's link light and that the switch is on NIC2 (`PHONE_LAN_PARENT`). `docker compose logs batter \| grep lan` shows DHCP and firewall errors; if the firewall can't be installed, Batter takes the phone network down rather than run it open. |
+| Logs say the default route goes through the phone LAN | Docker is older than 28 and ignored `gw_priority`. Update Docker. |
+| Phone shows **Needs USB re-provision** | It restarted. Plug it into USB and click **Switch to ethernet** in Edit Device. |
+| Phone on ethernet has no internet | It needs a VPN profile (Edit Device → Internet), and that profile's tunnel must be up (Admin → VPN, **Check exit IP**). |
