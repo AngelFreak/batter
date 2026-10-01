@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/XpertaDK/batter/internal/api"
+	"github.com/XpertaDK/batter/internal/api/handlers"
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/XpertaDK/batter/internal/migrate"
@@ -61,13 +63,26 @@ func (l *fakeLAN) Reload(context.Context) error {
 	return l.err
 }
 
+func (l *fakeLAN) Provision(context.Context, string) error { return l.err }
+
+func (l *fakeLAN) NeedsReprovision(string) (netip.Addr, bool) { return netip.Addr{}, false }
+
 func (l *fakeLAN) reloaded() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.reloads
 }
 
-func newTestEnv(t *testing.T) *testEnv {
+// envSetup lets a test swap parts of the environment before the router is
+// built (see withRealLAN).
+type envSetup struct {
+	db  *pgxpool.Pool
+	dm  *device.Manager
+	vpn *vpn.Service
+	lan handlers.PhoneLAN
+}
+
+func newTestEnv(t *testing.T, opts ...func(*envSetup)) *testEnv {
 	t.Helper()
 
 	adminURL := os.Getenv("BATTER_TEST_DATABASE_URL")
@@ -96,12 +111,16 @@ func newTestEnv(t *testing.T) *testEnv {
 		Run:    func(context.Context, string, string, ...string) ([]byte, error) { return nil, nil },
 		Logger: logger,
 	}
+	setup := &envSetup{db: db, dm: dm, vpn: vpnSvc, lan: env.lan}
+	for _, o := range opts {
+		o(setup)
+	}
 	router, err := api.NewRouter(api.RouterConfig{
 		DeviceManager: dm,
 		DB:            db,
 		JWTManager:    env.jwt,
 		Logger:        logger,
-		LAN:           env.lan,
+		LAN:           setup.lan,
 		VPN:           vpnSvc,
 	})
 	if err != nil {

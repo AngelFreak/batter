@@ -181,3 +181,19 @@ func TestApplyBringsTheLANBackUpOnceFenced(t *testing.T) {
 		t.Fatal("LAN brought up before its firewall")
 	}
 }
+
+// The guard (run before the web app starts) fences the LAN with no phones
+// allowed anywhere, on the interface carrying Batter's LAN address.
+func TestGuardFencesTheLANBeforeAnythingListens(t *testing.T) {
+	sys := &fakeSystem{out: map[string]string{"ip -4 route show default": "default via 172.20.0.1 dev eth0\n"}}
+	if err := Guard(context.Background(), "127.0.0.1/8", "", sys.run, quiet); err != nil {
+		t.Fatal(err)
+	}
+	n, _ := ParseNetwork("127.0.0.1/8", "")
+	if got := sys.stdin["nft -f /dev/stdin"]; got != Ruleset("lo", n, nil) {
+		t.Fatalf("guard installed:\n%s", got)
+	}
+	if err := Guard(context.Background(), "10.77.0.1", "", sys.run, quiet); err == nil {
+		t.Fatal("invalid address accepted")
+	}
+}

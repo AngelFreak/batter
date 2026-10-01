@@ -130,3 +130,16 @@ func TestTrustedProxiesGatewayResolvesDefaultGateway(t *testing.T) {
 		t.Fatal("gateway with no readable route table accepted")
 	}
 }
+
+func TestLoadPhoneLAN(t *testing.T) {
+	t.Setenv("JWT_SECRET", "s")
+	t.Setenv("PHONE_LAN", "10.77.0.1/24")
+	t.Setenv("PHONE_LAN_POOL", "10.77.0.100-10.77.0.250")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PhoneLAN != "10.77.0.1/24" || cfg.PhoneLANPool != "10.77.0.100-10.77.0.250" {
+		t.Fatalf("phone LAN = %q %q", cfg.PhoneLAN, cfg.PhoneLANPool)
+	}
+}

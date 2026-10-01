@@ -30,6 +30,11 @@ type Config struct {
 	ScrcpyServerPath string
 	ScrcpyVersion    string
 
+	// PhoneLAN is Batter's address on the phone network with its prefix
+	// length (e.g. 10.77.0.1/24); empty = no phone network.
+	// PhoneLANPool is the DHCP pool ("first-last"; empty = the default).
+	PhoneLAN     string
+	PhoneLANPool string
 	// VPNExitIPURL answers with the caller's public IP (plain text); used to
 	// check where a VPN profile's phones exit.
 	VPNExitIPURL string
@@ -54,6 +59,8 @@ func Load() (*Config, error) {
 		DatabaseURL:      getEnv("DATABASE_URL", "postgres://batter:batter@localhost:5432/batter?sslmode=disable"),
 		ScrcpyServerPath: getEnv("SCRCPY_SERVER_PATH", "/usr/local/share/scrcpy/scrcpy-server"),
 		ScrcpyVersion:    getEnv("SCRCPY_VERSION", "3.3.4"),
+		PhoneLAN:         getEnv("PHONE_LAN", ""),
+		PhoneLANPool:     getEnv("PHONE_LAN_POOL", ""),
 		VPNExitIPURL:     getEnv("VPN_EXIT_IP_URL", "https://api.ipify.org"),
 		JWTSecret:        getEnv("JWT_SECRET", ""),
 		DataDir:          getEnv("DATA_DIR", "./data"),

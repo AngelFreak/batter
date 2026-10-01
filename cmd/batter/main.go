@@ -17,14 +17,20 @@ import (
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/config"
 	"github.com/XpertaDK/batter/internal/device"
+	"github.com/XpertaDK/batter/internal/lan"
 	"github.com/XpertaDK/batter/internal/migrate"
 	"github.com/XpertaDK/batter/internal/vpn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
 	// Helper run as a profile's checker uid to see where its phones exit.
 	if len(os.Args) > 1 && os.Args[1] == vpn.ExitIPSubcommand {
 		os.Exit(vpn.ExitIPCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	// Run by the container's start script before anything listens.
+	if len(os.Args) > 1 && os.Args[1] == lan.GuardSubcommand {
+		os.Exit(lanGuard())
 	}
 
 	cfg, err := config.Load()
@@ -74,11 +80,21 @@ func main() {
 		}
 	}
 
+	// The phone network: phones on ethernet adapters, routed through their
+	// VPN profiles. Without it, phones are USB-only and have no internet.
+	var phoneLAN *lan.Controller
+	if cfg.PhoneLAN != "" {
+		phoneLAN, err = newPhoneLAN(cfg, db, dm, vpnSvc, logger.With("component", "lan"))
+		if err != nil {
+			logger.Error("phone network unavailable", "error", err)
+		}
+	}
+
 	// Initialize JWT manager
 	jwtManager := auth.NewJWTManager(cfg.JWTSecret, cfg.JWTExpirySecs)
 
 	// Set up router
-	router, err := api.NewRouter(api.RouterConfig{
+	routerCfg := api.RouterConfig{
 		DeviceManager:  dm,
 		DB:             db,
 		JWTManager:     jwtManager,
@@ -86,7 +102,11 @@ func main() {
 		AllowedOrigins: cfg.AllowedOrigins,
 		TrustedProxies: cfg.TrustedProxies,
 		VPN:            vpnSvc,
-	})
+	}
+	if phoneLAN != nil {
+		routerCfg.LAN = phoneLAN
+	}
+	router, err := api.NewRouter(routerCfg)
 	if err != nil {
 		logger.Error("failed to set up router", "error", err)
 		os.Exit(1)
@@ -102,6 +122,14 @@ func main() {
 	}
 	if err := vpnSvc.Sync(ctx); err != nil {
 		logger.Error("failed to apply VPN profiles", "error", err)
+	}
+
+	// The phone LAN's firewall goes in (profiles' mark rules are in by now)
+	// before its DHCP server hands out addresses.
+	lanCtx, stopLAN := context.WithCancel(context.Background())
+	defer stopLAN()
+	if phoneLAN != nil {
+		go phoneLAN.Run(lanCtx)
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -120,6 +148,7 @@ func main() {
 	// Teardown order: stop taking requests (done by serve), then device
 	// sessions, then the DB pool that in-flight handlers were still using.
 	logger.Info("shutting down...")
+	stopLAN()
 	stopHealthCheck()
 	dm.Shutdown()
 	db.Close()
@@ -129,6 +158,46 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("shutdown complete")
+}
+
+// newPhoneLAN sets up the phone network's controller on the interface that
+// carries Batter's LAN address.
+func newPhoneLAN(cfg *config.Config, db *pgxpool.Pool, dm *device.Manager, vpnSvc *vpn.Service, logger *slog.Logger) (*lan.Controller, error) {
+	n, err := lan.ParseNetwork(cfg.PhoneLAN, cfg.PhoneLANPool)
+	if err != nil {
+		return nil, err
+	}
+	iface, err := lan.FindInterface(n.Addr)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("phone network", "iface", iface, "address", cfg.PhoneLAN, "pool", n.PoolStart.String()+"-"+n.PoolEnd.String())
+	return &lan.Controller{
+		Iface:    iface,
+		Net:      n,
+		Leases:   &lan.Leases{DB: db, Net: n},
+		Firewall: &lan.Firewall{Iface: iface, Net: n, Logger: logger},
+		ADB:      dm.ADB(),
+		Profiles: vpnSvc,
+		Logger:   logger,
+	}, nil
+}
+
+// lanGuard fences the phone LAN (if configured) before the web app and
+// backend listen; see lan.Guard.
+func lanGuard() int {
+	addr := os.Getenv("PHONE_LAN")
+	if addr == "" {
+		return 0
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := lan.Guard(ctx, addr, os.Getenv("PHONE_LAN_POOL"), nil, logger); err != nil {
+		logger.Error("phone network not fenced", "error", err)
+		return 1
+	}
+	return 0
 }
 
 // shutdownDrainTimeout bounds how long in-flight HTTP requests may finish

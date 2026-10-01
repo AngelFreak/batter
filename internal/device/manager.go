@@ -541,6 +541,9 @@ type DeviceInfo struct {
 	// adapter, adb over TCP at LANAddress).
 	Connection string `json:"connection,omitempty"`
 	LANAddress string `json:"lan_address,omitempty"`
+	// NeedsReprovision marks a LAN phone whose adb over TCP is off (it
+	// rebooted): it must be switched on again over USB.
+	NeedsReprovision bool `json:"needs_reprovision,omitempty"`
 }
 
 // ValidateDevice checks whether a device is reachable via ADB and returns its state.
