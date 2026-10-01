@@ -170,6 +170,16 @@ func (c *Controller) syncPort(ctx context.Context) bool {
 		c.mu.Unlock()
 		cur = nil
 	}
+	if cur == nil && c.Host.Present(ctx) {
+		// A port left in Batter's namespace by an earlier run (the
+		// namespace outlived it): give it back and take it properly.
+		c.mu.Lock()
+		c.port = &adopted{mac: strings.ToLower(want.MAC), name: want.Name}
+		c.mu.Unlock()
+		if !c.release(ctx) {
+			return false
+		}
+	}
 	if cur == nil {
 		return c.adopt(ctx, *want)
 	}
