@@ -283,3 +283,22 @@ func TestNonPhoneClientsGetNothing(t *testing.T) {
 		t.Fatalf("clients %+v", st.Clients)
 	}
 }
+
+// A port already in Batter's namespace at start (left by an earlier run)
+// is given back and taken again, so its state is Batter's own.
+func TestAPortLeftInsideIsTakenAfresh(t *testing.T) {
+	c, _, host := newControllerOn(t, &fakeADB{}, fixedProfiles{}, nic2)
+	ctx := context.Background()
+	if _, err := host.Adopt(ctx, nic2.MAC); err != nil { // the earlier run's
+		t.Fatal(err)
+	}
+	host.log = nil
+	c.Pass(ctx)
+	defer c.stopDHCP()
+	if want := []string{"release enp2s0", "adopt enp2s0"}; !slices.Equal(host.log, want) {
+		t.Fatalf("box saw %v, want %v", host.log, want)
+	}
+	if st := status(t, c); st.State != StateActive {
+		t.Fatalf("status %+v", st)
+	}
+}

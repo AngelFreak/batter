@@ -134,6 +134,27 @@ func TestFenceInstallsTheRulesWithoutTheLink(t *testing.T) {
 	}
 }
 
+// While the port isn't in Batter's namespace, `ip rule` marks rules on it
+// "[detached]"; they are still the same rules.
+func TestDetachedRulesAreRecognised(t *testing.T) {
+	sys := &fakeSystem{out: map[string]string{
+		"ip rule show priority 9900": "9900:\tfrom all iif eth1 [detached] unreachable\n",
+		"ip rule show priority 9000": "9000:\tfrom 10.77.0.100 iif eth1 [detached] lookup 51820 \n",
+	}}
+	if err := newFirewall(t, sys).Fence(context.Background(), []Phone{phoneA}); err != nil {
+		t.Fatal(err)
+	}
+	if sys.has("ip rule add") || sys.has("ip rule del") {
+		t.Fatalf("detached rules not recognised:\n  %s", strings.Join(sys.log, "\n  "))
+	}
+	sys.log = nil
+	if err := newFirewall(t, sys).Remove(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sys.index(t, "ip rule del iif eth1 unreachable priority 9900")
+	sys.index(t, "ip rule del from 10.77.0.100 iif eth1 lookup 51820 priority 9000")
+}
+
 func TestFenceKeepsAnExistingCatchAll(t *testing.T) {
 	sys := &fakeSystem{out: map[string]string{
 		"ip rule show priority 9900": "9900:	from all iif eth1 unreachable\n",

@@ -157,7 +157,7 @@ func (f *Firewall) Remove(ctx context.Context) error {
 	}
 	if out, err := f.cmd(ctx, "", "ip", "rule", "show", "priority", catchAllPriority); err != nil {
 		errs = append(errs, err)
-	} else if strings.Contains(string(out), "iif "+f.Iface+" unreachable") {
+	} else if hasCatchAll(string(out), f.Iface) {
 		if _, err := f.cmd(ctx, "", "ip", "rule", "del", "iif", f.Iface, "unreachable", "priority", catchAllPriority); err != nil {
 			errs = append(errs, err)
 		}
@@ -185,7 +185,7 @@ func (f *Firewall) syncRoutes(ctx context.Context, phones []Phone) error {
 		if !ok {
 			continue
 		}
-		rule = strings.Join(strings.Fields(rule), " ")
+		rule = normalizeRule(rule)
 		have[rule] = true
 		if !want[rule] {
 			args := append([]string{"rule", "del"}, strings.Fields(rule)...)
@@ -205,12 +205,34 @@ func (f *Firewall) syncRoutes(ctx context.Context, phones []Phone) error {
 	return nil
 }
 
+// normalizeRule turns an `ip rule show` line's rule into the words `ip rule
+// add` takes. A rule on an interface that isn't in the namespace (the port
+// before Batter takes it) shows "[detached]".
+func normalizeRule(rule string) string {
+	var words []string
+	for _, w := range strings.Fields(rule) {
+		if w != "[detached]" {
+			words = append(words, w)
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+func hasCatchAll(rules, iface string) bool {
+	for _, line := range strings.Split(rules, "\n") {
+		if strings.Contains(normalizeRule(line), "iif "+iface+" unreachable") {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *Firewall) ensureCatchAll(ctx context.Context) error {
 	out, err := f.cmd(ctx, "", "ip", "rule", "show", "priority", catchAllPriority)
 	if err != nil {
 		return err
 	}
-	if strings.Contains(string(out), "iif "+f.Iface+" unreachable") {
+	if hasCatchAll(string(out), f.Iface) {
 		return nil
 	}
 	_, err = f.cmd(ctx, "", "ip", "rule", "add", "iif", f.Iface, "unreachable", "priority", catchAllPriority)
