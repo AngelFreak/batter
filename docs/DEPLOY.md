@@ -12,7 +12,7 @@ standard install.
 - Android phones with **USB debugging** enabled:
   1. **Settings → About phone** → tap **Build number** 7 times.
   2. **Settings → System → Developer options** → turn on **USB debugging**.
-- Optional, for HTTPS: a DNS name pointing at the box (e.g. `batter.example.com`).
+- Ports 80 and 443 free on the box (Batter serves HTTPS itself).
 
 **Don't run `adb` on the box itself.** Batter runs its own `adb` inside the
 container, and only one `adb` can hold a USB phone at a time. If `adb` is
@@ -37,7 +37,10 @@ You should see `postgres` and `batter` with status `healthy` (allow ~30 s).
 
 ## 3. Create the admin account — do this straight away
 
-Open `http://<box-ip>:3000` in a browser. The first visit shows **Create admin
+Open `https://<box-ip>` in a browser (LAN IP, NetBird IP or name — any works).
+The browser warns about the certificate the first time; see
+[step 6](#6-https-certificate) to make that go away, or click through for now
+(Chrome: **Advanced → Proceed**). The first visit shows **Create admin
 account**. Pick a username and a strong password (8+ characters) and submit;
 you're logged in.
 
@@ -73,38 +76,32 @@ Per-device (or per-group / per-team) grants decide what a non-admin can do:
 | **control** | Also touch/type, wake, stop the session, push files, install APKs. |
 | **manage** | Also rename or delete the device in Batter. |
 
-## 6. HTTPS (recommended when reachable beyond your LAN)
+## 6. HTTPS certificate
 
-Logins and the live stream go over plain HTTP otherwise. The simplest option is
-[Caddy](https://caddyserver.com/docs/install) on the box, which gets and renews
-a certificate automatically.
+Batter always serves HTTPS (browsers only allow live video on secure pages). A
+built-in Caddy issues certificates from its own local certificate authority for
+whatever address you open the box by, so there's nothing to configure — but
+browsers don't know that authority yet, hence the warning.
 
-1. Create a `.env` file next to `docker-compose.yml`:
+Trust it once per computer to get rid of the warning:
 
-   ```env
-   # Only accept connections from Caddy on this machine
-   BATTER_PORT=127.0.0.1:3000
-   # Let the login rate limit see real client IPs from Caddy
-   TRUSTED_PROXIES=127.0.0.1,::1
-   ```
+1. Download `https://<box-ip>/ca.crt` (click through the warning this once).
+2. Install it as a trusted root:
+   - **macOS:** double-click it → Keychain Access opens → double-click the
+     "Caddy Local Authority" certificate → **Trust → Always Trust**.
+   - **Windows:** double-click it → **Install Certificate → Local Machine →
+     Place all certificates in: Trusted Root Certification Authorities**.
+   - **Linux (Chrome/Chromium):** Settings → Privacy and security → Security →
+     Manage certificates → Authorities → **Import**, tick "Trust this
+     certificate for identifying websites".
+   - **Linux (system-wide, e.g. curl):** `sudo cp ca.crt /usr/local/share/ca-certificates/batter.crt && sudo update-ca-certificates`
+3. Restart the browser.
 
-2. `/etc/caddy/Caddyfile`:
+The authority's key stays on the box (in the `caddy_data` volume) and is kept
+across updates, so this is a one-time step per computer.
 
-   ```
-   batter.example.com {
-       reverse_proxy 127.0.0.1:3000
-   }
-   ```
-
-3. Apply both:
-
-   ```bash
-   docker compose up -d
-   sudo systemctl reload caddy
-   ```
-
-4. Open `https://batter.example.com`. Nothing else needs changing — WebSockets
-   (live video and input) work through Caddy as-is.
+Port 3000 (plain HTTP) is only reachable from the box itself; everything else
+goes through HTTPS on port 443 (port 80 redirects to it).
 
 ## 7. Day-to-day
 
@@ -152,8 +149,7 @@ full list. The ones you might touch:
 
 | Setting | Default | When to change it |
 |---|---|---|
-| `BATTER_PORT` | `3000` | Different port, or `127.0.0.1:3000` behind a proxy. |
-| `TRUSTED_PROXIES` | none | Behind Caddy/nginx: `127.0.0.1,::1`. |
+| `BATTER_PORT` | `127.0.0.1:3000` | Only for direct plain-HTTP access to the app port. |
 | `LOG_LEVEL` | `info` | `debug` when troubleshooting. |
 | `ALLOWED_ORIGINS` | same host only | Only if the UI is served from another domain. |
 
@@ -164,6 +160,7 @@ full list. The ones you might touch:
 | **Scan for devices** finds nothing | Check the phone shows the USB debugging prompt and tap **Allow**. Make sure no `adb` runs on the host (`adb kill-server`). Re-plug the cable, wait a few seconds, scan again. |
 | Phone shows as **unauthorized** | Unlock the phone and accept the **Allow USB debugging?** prompt. |
 | Video stays on "connecting" | Check `docker compose logs batter` for scrcpy errors, and that the phone is still listed by **Scan for devices**. |
-| Can log in but live view never connects (behind a proxy) | The proxy must pass WebSocket upgrades (Caddy does by default). For nginx, set `proxy_http_version 1.1` and the `Upgrade`/`Connection` headers. |
-| Everyone gets "too many requests" on login | Behind a proxy without `TRUSTED_PROXIES`, all users share one limit. Set it as in step 6. |
+| Live view says **needs-https** | You opened `http://…:3000`; use `https://<box-ip>` instead. |
+| Certificate warning every time | Trust `https://<box-ip>/ca.crt` as in step 6, then restart the browser. |
+| HTTPS doesn't load | Ports 80 and 443 must be free on the box: `sudo ss -ltnp 'sport = :443'`. Check `docker compose logs caddy`. |
 | `batter` container isn't `healthy` | `docker compose logs batter` — a database or migration error is printed at startup. |

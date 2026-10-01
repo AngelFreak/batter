@@ -105,3 +105,23 @@ test('a stale socket closing does not trigger an extra reconnect', async () => {
   await flush();
   assert.equal(sockets(), 2);
 });
+
+for (const [secure, want] of [[false, 'needs-https'], [true, 'unsupported']] as const) {
+  test(`without WebCodecs on a ${secure ? 'secure' : 'plain-HTTP'} page the player reports ${want}`, () => {
+    const w = (globalThis as unknown as { window: { isSecureContext?: boolean } }).window;
+    w.isSecureContext = secure;
+    try {
+      for (const Player of [DeviceVideoPlayer, DeviceThumbnailPlayer]) {
+        const statuses: string[] = [];
+        const p = new Player(fakeCanvas());
+        p.setOnStatusChange((s) => statuses.push(s));
+        p.connect('A');
+        last().open();
+        assert.ok(statuses.includes(want), `${Player.name}: ${statuses}`);
+        p.disconnect();
+      }
+    } finally {
+      delete w.isSecureContext;
+    }
+  });
+}

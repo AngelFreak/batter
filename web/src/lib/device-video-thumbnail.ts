@@ -81,8 +81,10 @@ export class DeviceThumbnailPlayer {
   }
 
   private initDecoder() {
+    // Browsers only expose WebCodecs on secure pages (HTTPS or localhost).
+    const secure = window.isSecureContext;
     if (!("VideoDecoder" in window)) {
-      this.onStatusChange?.("unsupported");
+      this.onStatusChange?.(secure ? "unsupported" : "needs-https");
       return;
     }
 

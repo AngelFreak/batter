@@ -33,9 +33,12 @@ cd batter
 docker compose up -d
 ```
 
-Then open `http://<host>:3000` and create the admin account. No `.env` is needed:
-the login-token secret is generated on first start, the app accepts requests
-from whatever host you open it on, and database migrations run automatically.
+Then open `https://<host>` and create the admin account. No `.env` is needed:
+HTTPS is served by a built-in Caddy with its own local certificate authority
+(trust `https://<host>/ca.crt` once per computer to remove the browser
+warning), the login-token secret is generated on first start, the app accepts
+requests from whatever host you open it on, and database migrations run
+automatically.
 
 **Full step-by-step guide** — phones, users, HTTPS, updates, backups and
 troubleshooting: [docs/DEPLOY.md](docs/DEPLOY.md). Optional settings are listed
