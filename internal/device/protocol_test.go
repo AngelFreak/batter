@@ -2,6 +2,7 @@ package device
 
 import (
 	"encoding/binary"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -99,4 +100,31 @@ func TestEncodeGetClipboard(t *testing.T) {
 	assert.Equal(t, byte(ControlTypeGetClipboard), buf[0])
 	assert.Equal(t, byte(CopyKeyCopy), buf[1])
 	assert.Len(t, buf, 2)
+}
+
+func TestEncodeResetVideo(t *testing.T) {
+	// scrcpy 3.x TYPE_RESET_VIDEO = 17, no payload: restarts the encoder,
+	// which emits a fresh config packet and keyframe.
+	if got := EncodeResetVideo(); len(got) != 1 || got[0] != 17 {
+		t.Fatalf("EncodeResetVideo() = %v, want [17]", got)
+	}
+}
+
+func TestRequestKeyframeSendsResetVideoOnControlSocket(t *testing.T) {
+	device, server := net.Pipe()
+	defer device.Close()
+	s := &Session{controlConn: server}
+
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 8)
+		n, _ := device.Read(buf)
+		got <- buf[:n]
+	}()
+	if err := s.RequestKeyframe(); err != nil {
+		t.Fatal(err)
+	}
+	if b := <-got; len(b) != 1 || b[0] != 17 {
+		t.Fatalf("control socket received %v, want [17]", b)
+	}
 }

@@ -330,6 +330,13 @@ func (s *Session) ReleaseControl(id string) {
 // WriteControl sends a binary control message to the device. It is safe to
 // call from multiple goroutines: writes are serialized so scrcpy's binary
 // control protocol is never interleaved.
+// RequestKeyframe makes the device send a new config packet and keyframe.
+// scrcpy only sends frames when the screen changes, so a viewer joining an
+// existing session would otherwise see nothing until something moves.
+func (s *Session) RequestKeyframe() error {
+	return s.WriteControl(EncodeResetVideo())
+}
+
 func (s *Session) WriteControl(data []byte) error {
 	if s.controlConn == nil {
 		return fmt.Errorf("control connection not established")

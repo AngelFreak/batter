@@ -79,6 +79,11 @@ func (h *DeviceWSHandler) VideoStream(c *gin.Context) {
 			return
 		}
 	}
+	// A decoder can't start without a keyframe, and a still screen produces
+	// no frames at all, so ask for one now rather than show a black canvas.
+	if err := session.RequestKeyframe(); err != nil {
+		h.logger.Warn("failed to request keyframe", "serial", serial, "error", err)
+	}
 
 	// Read loop to detect client disconnect
 	go func() {
