@@ -30,6 +30,10 @@ type Config struct {
 	ScrcpyServerPath string
 	ScrcpyVersion    string
 
+	// Reverse tethering (gnirehtet). Disabled if the binary is missing.
+	GnirehtetPath string
+	GnirehtetAPK  string
+
 	// Auth
 	JWTSecret     string
 	JWTExpirySecs int
@@ -50,6 +54,8 @@ func Load() (*Config, error) {
 		DatabaseURL:      getEnv("DATABASE_URL", "postgres://batter:batter@localhost:5432/batter?sslmode=disable"),
 		ScrcpyServerPath: getEnv("SCRCPY_SERVER_PATH", "/usr/local/share/scrcpy/scrcpy-server"),
 		ScrcpyVersion:    getEnv("SCRCPY_VERSION", "3.3.4"),
+		GnirehtetPath:    getEnv("GNIREHTET_PATH", "/usr/local/bin/gnirehtet"),
+		GnirehtetAPK:     getEnv("GNIREHTET_APK", "/usr/local/share/gnirehtet/gnirehtet.apk"),
 		JWTSecret:        getEnv("JWT_SECRET", ""),
 		DataDir:          getEnv("DATA_DIR", "./data"),
 		JWTExpirySecs:    getEnvInt("JWT_EXPIRY_SECS", 3600),

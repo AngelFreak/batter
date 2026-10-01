@@ -17,6 +17,7 @@ import (
 	"github.com/XpertaDK/batter/internal/config"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/XpertaDK/batter/internal/migrate"
+	"github.com/XpertaDK/batter/internal/tether"
 )
 
 func main() {
@@ -78,6 +79,21 @@ func main() {
 	// Start session health checker (cleans up dead sessions every 30s)
 	stopHealthCheck := dm.StartHealthChecker(30 * time.Second)
 
+	// Reverse tethering relay; devices opt in individually.
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	defer stopRelay()
+	if _, err := os.Stat(cfg.GnirehtetPath); err == nil {
+		relay := &tether.Relay{
+			Path:   cfg.GnirehtetPath,
+			UID:    tether.RelayUID,
+			GID:    tether.RelayUID,
+			Logger: logger.With("component", "tether-relay"),
+		}
+		go relay.Run(relayCtx)
+	} else {
+		logger.Warn("reverse tethering unavailable: gnirehtet not found", "path", cfg.GnirehtetPath)
+	}
+
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -94,6 +110,7 @@ func main() {
 	// Teardown order: stop taking requests (done by serve), then device
 	// sessions, then the DB pool that in-flight handlers were still using.
 	logger.Info("shutting down...")
+	stopRelay()
 	stopHealthCheck()
 	dm.Shutdown()
 	db.Close()
