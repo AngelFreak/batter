@@ -10,19 +10,25 @@ import (
 	"strings"
 )
 
-// catchAllPriority is the LAN's last-resort routing rule: anything
-// forwarded from the LAN that no profile's mark rule (9000+slot) claimed is
-// unreachable. It comes before the main table (32766), so a phone without a
-// working profile never takes the container's own default route.
-const catchAllPriority = "9900"
+// Routing rules. Each phone with a profile has `from <ip> iif <lan> lookup
+// <its profile's table>` at phonePriority. The catch-all makes anything
+// else forwarded from the LAN unreachable; it comes before the main table
+// (32766), so a phone without a working route never takes the container's
+// own default route. Routing by source address (rather than by a firewall
+// mark) also keeps reverse-path checks of replies to the phone working:
+// those look the phone's address up as if it came from the LAN.
+const (
+	phonePriority    = "9000"
+	catchAllPriority = "9900"
+)
 
 // Phone is one adapter on the LAN as the firewall sees it.
 type Phone struct {
 	IP  netip.Addr
 	MAC string
-	// Mark routes the phone's packets to its VPN profile's table; 0 = no
-	// profile, so nothing is forwarded for it.
-	Mark uint32
+	// Table is its VPN profile's routing table; 0 = no profile, so nothing
+	// is routed or forwarded for it.
+	Table int
 	// DNS is the profile's DNS server, which the phone's DNS queries are
 	// redirected to; invalid = none (queries to Batter are dropped).
 	DNS netip.Addr
@@ -47,13 +53,13 @@ func Exec(ctx context.Context, stdin, name string, args ...string) ([]byte, erro
 // transaction, so re-applying never opens a window.
 func Ruleset(iface string, n Network, phones []Phone) string {
 	lan := fmt.Sprintf("%q", iface)
-	var mark, dns strings.Builder
+	var allow, dns strings.Builder
 	for _, p := range phones {
-		if p.Mark == 0 {
+		if p.Table == 0 {
 			continue
 		}
+		fmt.Fprintf(&allow, "\t\tiifname %s oifname \"wg*\" ip saddr %s ether saddr %s accept\n", lan, p.IP, p.MAC)
 		who := fmt.Sprintf("iifname %s ip saddr %s ether saddr %s", lan, p.IP, p.MAC)
-		fmt.Fprintf(&mark, "\t\t%s meta mark set %d\n", who, p.Mark)
 		if p.DNS.Is4() {
 			fmt.Fprintf(&dns, "\t\t%s meta l4proto { tcp, udp } th dport 53 dnat ip to %s\n", who, p.DNS)
 		}
@@ -61,10 +67,6 @@ func Ruleset(iface string, n Network, phones []Phone) string {
 	return "table inet batter_lan {}\n" +
 		"delete table inet batter_lan\n" +
 		"table inet batter_lan {\n" +
-		"\tchain mark {\n" +
-		"\t\ttype filter hook prerouting priority mangle; policy accept;\n" +
-		mark.String() +
-		"\t}\n" +
 		"\tchain dns {\n" +
 		"\t\ttype nat hook prerouting priority dstnat; policy accept;\n" +
 		dns.String() +
@@ -81,7 +83,7 @@ func Ruleset(iface string, n Network, phones []Phone) string {
 		"\t\tiifname " + lan + " meta nfproto ipv6 drop\n" +
 		"\t\toifname " + lan + " meta nfproto ipv6 drop\n" +
 		"\t\toifname \"wg*\" tcp flags syn / syn,rst tcp option maxseg size set rt mtu\n" +
-		"\t\tiifname " + lan + " oifname \"wg*\" meta mark != 0 accept\n" +
+		allow.String() +
 		"\t\tiifname " + lan + " drop\n" +
 		"\t\tiifname \"wg*\" oifname " + lan + " ct state established,related accept\n" +
 		"\t\toifname " + lan + " drop\n" +
@@ -129,11 +131,54 @@ func (f *Firewall) apply(ctx context.Context, phones []Phone) error {
 	if _, err := f.cmd(ctx, Ruleset(f.Iface, f.Net, phones), "nft", "-f", "/dev/stdin"); err != nil {
 		return err
 	}
+	if err := f.syncRoutes(ctx, phones); err != nil {
+		return err
+	}
 	if _, err := f.cmd(ctx, "", "ip", "link", "set", f.Iface, "up"); err != nil {
 		return err
 	}
 	_, err = f.cmd(ctx, "", "sysctl", "-w", "net.ipv4.ip_forward=1")
 	return err
+}
+
+// syncRoutes makes the phones' routing rules match phones: stale ones are
+// removed before new ones are added, so a phone switching profile is never
+// routed two ways (the catch-all holds it in between).
+func (f *Firewall) syncRoutes(ctx context.Context, phones []Phone) error {
+	want := map[string]bool{}
+	for _, p := range phones {
+		if p.Table != 0 {
+			want[fmt.Sprintf("from %s iif %s lookup %d", p.IP, f.Iface, p.Table)] = true
+		}
+	}
+	out, err := f.cmd(ctx, "", "ip", "rule", "show", "priority", phonePriority)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		_, rule, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		rule = strings.Join(strings.Fields(rule), " ")
+		have[rule] = true
+		if !want[rule] {
+			args := append([]string{"rule", "del"}, strings.Fields(rule)...)
+			if _, err := f.cmd(ctx, "", "ip", append(args, "priority", phonePriority)...); err != nil {
+				return err
+			}
+		}
+	}
+	for rule := range want {
+		if !have[rule] {
+			args := append([]string{"rule", "add"}, strings.Fields(rule)...)
+			if _, err := f.cmd(ctx, "", "ip", append(args, "priority", phonePriority)...); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // usesDevice reports whether any route in `ip route` output goes out dev.

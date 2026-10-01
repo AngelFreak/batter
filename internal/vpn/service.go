@@ -39,12 +39,11 @@ type Service struct {
 	errs map[Slot]error // last apply error per slot
 }
 
-// Assignment is where a phone's traffic goes: the mark that routes it to
-// its profile's table, and the profile's DNS server (invalid if it has no
-// IPv4 one).
+// Assignment is where a phone's traffic goes: its profile's routing table,
+// and the profile's DNS server (invalid if it has no IPv4 one).
 type Assignment struct {
-	Mark uint32
-	DNS  netip.Addr
+	Table int
+	DNS   netip.Addr
 }
 
 // ProfileInfo describes a profile for admins. It never contains secrets.
@@ -198,8 +197,8 @@ func (s *Service) Delete(ctx context.Context, id string) ([]string, error) {
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), applyTimeout)
 	defer cancel()
-	// Until the LAN firewall drops the phones' mark, their packets find no
-	// route in the flushed table and fall to the LAN's catch-all.
+	// Until the LAN drops the phones' routes, their packets find nothing in
+	// the flushed table and fall to the LAN's catch-all.
 	s.tunnels().teardown(ctx, p.slot)
 	delete(s.errs, p.slot)
 	s.Logger.Info("vpn profile deleted", "profile", p.name, "slot", p.slot, "unassigned", serials)
@@ -256,7 +255,8 @@ func (s *Service) Exists(ctx context.Context, id string) error {
 }
 
 // Assignments maps each phone with a profile to where its traffic goes.
-// A disabled profile's phones keep its mark: its kill switch blocks them.
+// A disabled profile's phones are still routed to its table, whose kill
+// switch blocks them.
 func (s *Service) Assignments(ctx context.Context) (map[string]Assignment, error) {
 	rows, err := s.DB.Query(ctx,
 		`SELECT d.serial, p.slot, p.config FROM devices d JOIN vpn_profiles p ON p.id = d.vpn_profile_id`)
@@ -271,7 +271,7 @@ func (s *Service) Assignments(ctx context.Context) (map[string]Assignment, error
 		if err := rows.Scan(&serial, &slot, &config); err != nil {
 			return nil, err
 		}
-		a := Assignment{Mark: Slot(slot).Mark()}
+		a := Assignment{Table: Slot(slot).Table()}
 		if cfg, err := Parse(config); err == nil {
 			for _, d := range cfg.DNS {
 				if ip, err := netip.ParseAddr(d); err == nil && ip.Is4() {

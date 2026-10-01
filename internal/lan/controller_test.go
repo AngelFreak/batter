@@ -121,7 +121,7 @@ func newController(t *testing.T, adb *fakeADB, profiles fixedProfiles) (*Control
 // lease (and with it the routing) follows the phone actually behind it.
 func TestAnAdapterMovedToAnotherPhoneIsReidentified(t *testing.T) {
 	adb := &fakeADB{phones: map[string]string{"10.77.0.100:5555": "PHONE1"}}
-	c, sys := newController(t, adb, fixedProfiles{"PHONE1": {Mark: 51820}, "PHONE2": {Mark: 51821}})
+	c, sys := newController(t, adb, fixedProfiles{"PHONE1": {Table: 51820}, "PHONE2": {Table: 51821}})
 	ctx := context.Background()
 	lease, err := c.Leases.Allocate(ctx, "02:00:00:00:00:0a", "")
 	if err != nil {
@@ -131,9 +131,7 @@ func TestAnAdapterMovedToAnotherPhoneIsReidentified(t *testing.T) {
 	if got := adb.transport("PHONE1"); got != "10.77.0.100:5555" {
 		t.Fatalf("PHONE1 transport %q", got)
 	}
-	if !strings.Contains(sys.stdin["nft -f /dev/stdin"], "meta mark set 51820") {
-		t.Fatal("PHONE1's adapter not routed through its profile")
-	}
+	sys.index(t, "ip rule add from 10.77.0.100 iif eth1 lookup 51820")
 
 	// The adapter now sits on PHONE2 (its adb dropped and reconnects).
 	_ = adb.Disconnect(ctx, "10.77.0.100:5555")
@@ -151,10 +149,8 @@ func TestAnAdapterMovedToAnotherPhoneIsReidentified(t *testing.T) {
 	if l.Serial != "PHONE2" {
 		t.Fatalf("lease bound to %q", l.Serial)
 	}
-	rules := sys.stdin["nft -f /dev/stdin"]
-	if !strings.Contains(rules, "meta mark set 51821") || strings.Contains(rules, "meta mark set 51820") {
-		t.Fatalf("routing didn't follow the phone:\n%s", rules)
-	}
+	// (The fake `ip rule show` lists nothing, so only the add shows.)
+	sys.index(t, "ip rule add from 10.77.0.100 iif eth1 lookup 51821")
 }
 
 // A phone already connected isn't asked for its serial again every pass.

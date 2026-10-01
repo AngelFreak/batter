@@ -22,20 +22,36 @@ import (
 // handler and controller, against the fake adb's phone. Only the system
 // (nft, ip) and the TCP probe of the phone's adb port are simulated.
 
-// recordingSystem stands in for nft/ip/sysctl, keeping the last ruleset.
+// recordingSystem stands in for nft/ip/sysctl, keeping the last ruleset
+// and the phones' routing rules as `ip rule` would.
 type recordingSystem struct {
-	mu    sync.Mutex
-	rules string
+	mu     sync.Mutex
+	rules  string
+	routes map[string]bool // "from <ip> iif eth1 lookup <table>"
 }
 
 func (s *recordingSystem) run(_ context.Context, stdin, name string, args ...string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if name == "nft" {
+	cmd := strings.Join(args, " ")
+	switch {
+	case name == "nft":
 		s.rules = stdin
-	}
-	if name == "ip" && strings.Join(args, " ") == "-4 route show default" {
+	case name == "ip" && cmd == "-4 route show default":
 		return []byte("default via 172.20.0.1 dev eth0\n"), nil
+	case name == "ip" && cmd == "rule show priority 9000":
+		var out strings.Builder
+		for r := range s.routes {
+			out.WriteString("9000:\t" + r + " \n")
+		}
+		return []byte(out.String()), nil
+	case name == "ip" && strings.HasPrefix(cmd, "rule add from "):
+		if s.routes == nil {
+			s.routes = map[string]bool{}
+		}
+		s.routes[strings.TrimSuffix(strings.TrimPrefix(cmd, "rule add "), " priority 9000")] = true
+	case name == "ip" && strings.HasPrefix(cmd, "rule del from "):
+		delete(s.routes, strings.TrimSuffix(strings.TrimPrefix(cmd, "rule del "), " priority 9000"))
 	}
 	return nil, nil
 }
@@ -44,6 +60,16 @@ func (s *recordingSystem) ruleset() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.rules
+}
+
+func (s *recordingSystem) routed() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for r := range s.routes {
+		out = append(out, r)
+	}
+	return out
 }
 
 type lanEnv struct {
@@ -213,24 +239,27 @@ func TestPhoneMovesFromUSBToTheLANAndBack(t *testing.T) {
 		}
 	}
 
-	// No profile: its adapter is fenced, nothing forwarded.
-	if rules := e.sys.ruleset(); strings.Contains(rules, "meta mark set") {
-		t.Fatalf("phone without a profile is marked:\n%s", rules)
+	// No profile: its adapter is fenced, nothing routed or forwarded.
+	if rules := e.sys.ruleset(); strings.Contains(rules, `oifname "wg*" ip saddr`) || len(e.sys.routed()) != 0 {
+		t.Fatalf("phone without a profile is routed: %v\n%s", e.sys.routed(), rules)
 	}
 	profile := e.createProfile(t, "Sweden")
 	w := e.do(t, "admin", "PUT", "/api/v1/devices/"+fakeSerial+"/tether", `{"profile_id":"`+profile+`"}`)
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "apply_error") {
 		t.Fatalf("assign: %d %s", w.Code, w.Body.String())
 	}
-	want := `iifname "eth1" ip saddr 10.77.0.100 ether saddr ` + mac + ` meta mark set 51820`
+	want := `iifname "eth1" oifname "wg*" ip saddr 10.77.0.100 ether saddr ` + mac + ` accept`
 	if rules := e.sys.ruleset(); !strings.Contains(rules, want) || !strings.Contains(rules, "dnat ip to 10.64.0.1") {
-		t.Fatalf("assignment didn't route the phone's adapter through its profile:\n%s", rules)
+		t.Fatalf("assignment didn't let the phone's adapter into its profile's tunnel:\n%s", rules)
+	}
+	if got := e.sys.routed(); len(got) != 1 || got[0] != "from 10.77.0.100 iif eth1 lookup 51820" {
+		t.Fatalf("phone's routes: %v", got)
 	}
 	if w := e.do(t, "admin", "PUT", "/api/v1/devices/"+fakeSerial+"/tether", `{"profile_id":null}`); w.Code != http.StatusOK {
 		t.Fatalf("unassign: %d", w.Code)
 	}
-	if rules := e.sys.ruleset(); strings.Contains(rules, "meta mark set") {
-		t.Fatalf("unassigned phone still routed:\n%s", rules)
+	if rules := e.sys.ruleset(); strings.Contains(rules, `oifname "wg*" ip saddr`) || len(e.sys.routed()) != 0 {
+		t.Fatalf("unassigned phone still routed: %v\n%s", e.sys.routed(), rules)
 	}
 
 	// The phone reboots: its adapter is back, adbd no longer on TCP.

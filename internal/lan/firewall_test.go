@@ -59,9 +59,9 @@ func (f *fakeSystem) has(prefix string) bool {
 }
 
 var (
-	phoneA = Phone{IP: netip.MustParseAddr("10.77.0.100"), MAC: "02:00:00:00:00:0a", Mark: 51820, DNS: netip.MustParseAddr("10.99.0.1")}
-	phoneB = Phone{IP: netip.MustParseAddr("10.77.0.101"), MAC: "02:00:00:00:00:0b", Mark: 51821}
-	// No profile: no mark, so nothing routes it.
+	phoneA = Phone{IP: netip.MustParseAddr("10.77.0.100"), MAC: "02:00:00:00:00:0a", Table: 51820, DNS: netip.MustParseAddr("10.99.0.1")}
+	phoneB = Phone{IP: netip.MustParseAddr("10.77.0.101"), MAC: "02:00:00:00:00:0b", Table: 51821}
+	// No profile: no route and nothing forwarded.
 	phoneC = Phone{IP: netip.MustParseAddr("10.77.0.102"), MAC: "02:00:00:00:00:0c"}
 )
 
@@ -75,14 +75,13 @@ func TestRulesetConfinesThePhoneLAN(t *testing.T) {
 	for _, want := range []string{
 		// Replaced in one transaction: never a window without rules.
 		"table inet batter_lan {}\ndelete table inet batter_lan\ntable inet batter_lan {",
-		// Each phone with a profile is marked for its profile's table, by
-		// address and adapter (another device can't borrow its address).
-		`iifname "eth1" ip saddr 10.77.0.100 ether saddr 02:00:00:00:00:0a meta mark set 51820`,
-		`iifname "eth1" ip saddr 10.77.0.101 ether saddr 02:00:00:00:00:0b meta mark set 51821`,
 		// DNS goes to the profile's server (through its tunnel).
 		`iifname "eth1" ip saddr 10.77.0.100 ether saddr 02:00:00:00:00:0a meta l4proto { tcp, udp } th dport 53 dnat ip to 10.99.0.1`,
-		// Forwarding: marked phones into tunnels only; replies back.
-		`iifname "eth1" oifname "wg*" meta mark != 0 accept`,
+		// Forwarding: each phone with a profile into tunnels only, by
+		// address and adapter (another device can't borrow its address);
+		// replies back.
+		`iifname "eth1" oifname "wg*" ip saddr 10.77.0.100 ether saddr 02:00:00:00:00:0a accept`,
+		`iifname "eth1" oifname "wg*" ip saddr 10.77.0.101 ether saddr 02:00:00:00:00:0b accept`,
 		`iifname "wg*" oifname "eth1" ct state established,related accept`,
 		`iifname "eth1" drop`,
 		`oifname "eth1" drop`,
@@ -120,9 +119,10 @@ func TestApplyFencesTheLANBeforeForwarding(t *testing.T) {
 	}
 	catchAll := sys.index(t, "ip rule add iif eth1 unreachable priority 9900")
 	nft := sys.index(t, "nft -f /dev/stdin")
+	route := sys.index(t, "ip rule add from 10.77.0.100 iif eth1 lookup 51820 priority 9000")
 	forward := sys.index(t, "sysctl -w net.ipv4.ip_forward=1")
-	if catchAll > forward || nft > forward {
-		t.Fatalf("forwarding on before the LAN is fenced:\n  %s", strings.Join(sys.log, "\n  "))
+	if catchAll > route || nft > route || route > forward {
+		t.Fatalf("phone routed or forwarding on before the LAN is fenced:\n  %s", strings.Join(sys.log, "\n  "))
 	}
 	if got := sys.stdin["nft -f /dev/stdin"]; got != Ruleset("eth1", fw.Net, []Phone{phoneA}) {
 		t.Fatalf("nft fed:\n%s", got)
@@ -145,9 +145,32 @@ func TestApplyKeepsAnExistingCatchAll(t *testing.T) {
 	}
 }
 
+// Each phone's traffic is routed to its profile's table by source address.
+// Stale rules (a phone switched profile, or lost it) go before new ones are
+// added, so a switch never has two routes; in between, the catch-all holds.
+func TestApplyRoutesPhonesBySourceAndDropsStaleRoutes(t *testing.T) {
+	sys := &fakeSystem{out: map[string]string{
+		"ip -4 route show default": "default via 172.20.0.1 dev eth0\n",
+		"ip rule show priority 9000": "9000:\tfrom 10.77.0.101 iif eth1 lookup 51821 \n" + // phoneB: right
+			"9000:\tfrom 10.77.0.100 iif eth1 lookup 51821 \n" + // phoneA: old profile
+			"9000:\tfrom 10.77.0.102 iif eth1 lookup 51820 \n", // phoneC: profile taken away
+	}}
+	if err := newFirewall(t, sys).Apply(context.Background(), []Phone{phoneA, phoneB, phoneC}); err != nil {
+		t.Fatal(err)
+	}
+	delOld := sys.index(t, "ip rule del from 10.77.0.100 iif eth1 lookup 51821 priority 9000")
+	sys.index(t, "ip rule del from 10.77.0.102 iif eth1 lookup 51820 priority 9000")
+	if add := sys.index(t, "ip rule add from 10.77.0.100 iif eth1 lookup 51820 priority 9000"); add < delOld {
+		t.Fatal("new route added before the old one went")
+	}
+	if sys.has("ip rule del from 10.77.0.101") || sys.has("ip rule add from 10.77.0.101") || sys.has("ip rule add from 10.77.0.102") {
+		t.Fatalf("touched a correct or unassigned phone's route:\n  %s", strings.Join(sys.log, "\n  "))
+	}
+}
+
 // If the rules can't go in, the phones get nothing: the LAN goes down.
 func TestApplyFailureTakesTheLANDown(t *testing.T) {
-	for _, fail := range []string{"nft", "ip rule add"} {
+	for _, fail := range []string{"nft", "ip rule add iif", "ip rule add from"} {
 		sys := &fakeSystem{fail: fail, out: map[string]string{"ip -4 route show default": "default via 172.20.0.1 dev eth0\n"}}
 		if err := newFirewall(t, sys).Apply(context.Background(), []Phone{phoneA}); err == nil {
 			t.Fatalf("%s failing: no error", fail)
