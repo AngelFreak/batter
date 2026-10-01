@@ -82,7 +82,7 @@ First start takes a few minutes to build. After that, starts are instant.
 | **postgres** | PostgreSQL 16 database, data persisted in a Docker volume |
 | **batter** | Go backend + Next.js frontend + scrcpy-server, all in one container |
 
-Database migrations are applied automatically on first start.
+Database migrations are applied by the backend on every start (only pending ones run; each is recorded in `schema_migrations`). To change the schema, add an idempotent `db/migrations/NNN_name.sql` — it is embedded in the binary and applied on the next deploy.
 
 ### Step 4: Open the browser
 
@@ -215,7 +215,7 @@ internal/
   auth/                  # JWT + password hashing
   config/                # Environment config
   device/                # ADB, scrcpy sessions, screenshot cache
-db/migrations/           # PostgreSQL schema migrations (auto-applied)
+db/migrations/           # PostgreSQL schema migrations (embedded, applied at startup)
 web/                     # Next.js frontend
   src/
     app/

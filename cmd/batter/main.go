@@ -16,6 +16,7 @@ import (
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/config"
 	"github.com/XpertaDK/batter/internal/device"
+	"github.com/XpertaDK/batter/internal/migrate"
 )
 
 func main() {
@@ -29,8 +30,8 @@ func main() {
 		Level: cfg.LogLevel,
 	}))
 
-	// Connect to database
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Connect to database and bring the schema up to date
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	db, err := handlers.ConnectDB(ctx, cfg.DatabaseURL)
@@ -39,6 +40,11 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("connected to database")
+
+	if err := migrate.Up(ctx, db, logger); err != nil {
+		logger.Error("failed to apply database migrations", "error", err)
+		os.Exit(1)
+	}
 
 	// Initialize device manager
 	dm, err := device.NewManager(device.ManagerConfig{

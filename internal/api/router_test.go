@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/XpertaDK/batter/internal/api"
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
+	"github.com/XpertaDK/batter/internal/migrate"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -54,7 +54,9 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	ctx := context.Background()
 	db := createTestDatabase(t, ctx, adminURL)
-	applyMigrations(t, ctx, db)
+	if err := migrate.Up(ctx, db, logger); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
 
 	env := &testEnv{
 		db:    db,
@@ -141,24 +143,6 @@ func createTestDatabase(t *testing.T, ctx context.Context, adminURL string) *pgx
 		admin.Close()
 	})
 	return db
-}
-
-func applyMigrations(t *testing.T, ctx context.Context, db *pgxpool.Pool) {
-	t.Helper()
-	files, err := filepath.Glob("../../db/migrations/*.sql")
-	if err != nil || len(files) == 0 {
-		t.Fatalf("find migrations: %v (found %d)", err, len(files))
-	}
-	sort.Strings(files)
-	for _, f := range files {
-		sql, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.Exec(ctx, string(sql)); err != nil {
-			t.Fatalf("apply %s: %v", filepath.Base(f), err)
-		}
-	}
 }
 
 // seedDevice (re)creates the test device with per-user grants. Called again

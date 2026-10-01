@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_auth_sessions_user_id ON auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);
 
 -- Devices table (known devices, persisted across reboots)
 CREATE TABLE IF NOT EXISTS devices (
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS device_group_members (
     PRIMARY KEY (device_serial, group_id)
 );
 
-CREATE INDEX idx_device_group_members_group_id ON device_group_members(group_id);
+CREATE INDEX IF NOT EXISTS idx_device_group_members_group_id ON device_group_members(group_id);
 
 -- User device access (RBAC)
 CREATE TABLE IF NOT EXISTS user_device_access (
@@ -74,9 +74,9 @@ CREATE TABLE IF NOT EXISTS user_device_access (
     )
 );
 
-CREATE INDEX idx_user_device_access_user_id ON user_device_access(user_id);
-CREATE INDEX idx_user_device_access_device_serial ON user_device_access(device_serial);
-CREATE INDEX idx_user_device_access_group_id ON user_device_access(group_id);
+CREATE INDEX IF NOT EXISTS idx_user_device_access_user_id ON user_device_access(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_device_access_device_serial ON user_device_access(device_serial);
+CREATE INDEX IF NOT EXISTS idx_user_device_access_group_id ON user_device_access(group_id);
 
 -- Device tags
 CREATE TABLE IF NOT EXISTS device_tags (
@@ -95,5 +95,5 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_audit_log_user_id ON audit_log(user_id);
-CREATE INDEX idx_audit_log_created_at ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
