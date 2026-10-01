@@ -154,7 +154,7 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 	serverArgs := buildServerArgs(scid, scrcpyVersion, opts)
 	logger.Info("launching scrcpy-server", "args", serverArgs)
 	go func() {
-		out, err := adb.Shell(ctx, serial, serverArgs...)
+		out, err := adb.ServerShell(ctx, serial, serverArgs...)
 		if err != nil && ctx.Err() == nil {
 			logger.Error("scrcpy-server exited", "error", err, "output", string(out))
 		}

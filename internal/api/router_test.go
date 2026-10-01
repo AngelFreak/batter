@@ -681,3 +681,33 @@ func TestVPNProfilesNeverReturnPrivateKey(t *testing.T) {
 		t.Fatalf("unknown profile: status %d, want 404", w.Code)
 	}
 }
+
+// Every open dashboard polls the device list; through the real router, a
+// burst of polls must share one `adb devices` run.
+func TestDeviceListPollingSharesOneADBRun(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	fake := "#!/bin/sh\necho \"$@\" >> " + calls + "\n" +
+		"case \"$*\" in devices*) sleep 0.2; printf 'List of devices attached\\n" + testSerial + " device\\n' ;; esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "adb"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	env := newTestEnv(t)
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if w := env.do(t, "admin", "GET", "/api/v1/devices", ""); w.Code != http.StatusOK {
+				t.Errorf("status %d", w.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	b, _ := os.ReadFile(calls)
+	if n := strings.Count(string(b), "devices -l"); n != 1 {
+		t.Fatalf("%d `adb devices` runs for 20 concurrent polls, want 1", n)
+	}
+}

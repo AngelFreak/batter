@@ -3,12 +3,16 @@ package device
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 )
 
 // validSerial matches the characters ADB itself permits in a device serial:
@@ -35,10 +39,27 @@ type ADBDevice struct {
 	Product string `json:"product"`
 }
 
+// Default adb timeouts, applied when the caller's context has no deadline
+// so a wedged adb server or USB link can't hang a request forever.
+const (
+	defaultADBTimeout  = 30 * time.Second
+	transferADBTimeout = 10 * time.Minute // push/install of large files
+	defaultListTTL     = time.Second
+)
+
 // ADB wraps adb command-line operations.
 type ADB struct {
 	adbPath string
 	logger  *slog.Logger
+	timeout time.Duration // 0 = defaultADBTimeout
+	listTTL time.Duration // 0 = defaultListTTL
+
+	// The device listing is cached briefly and shared: every dashboard tab
+	// polls it, and each poll would otherwise run `adb devices`.
+	listMu      sync.Mutex
+	listAt      time.Time
+	listDevices []ADBDevice
+	listErr     error
 }
 
 // NewADB creates a new ADB wrapper, locating the adb binary in PATH.
@@ -56,8 +77,19 @@ func NewADB(logger *slog.Logger) (*ADB, error) {
 	}, nil
 }
 
-// ListDevices returns all connected ADB devices.
+// ListDevices returns all connected ADB devices. Results (and errors) are
+// reused for up to a second; concurrent callers wait for one shared run.
 func (a *ADB) ListDevices(ctx context.Context) ([]ADBDevice, error) {
+	a.listMu.Lock()
+	defer a.listMu.Unlock()
+	if a.listAt.IsZero() || time.Since(a.listAt) >= cmp.Or(a.listTTL, defaultListTTL) {
+		a.listDevices, a.listErr = a.listDevicesUncached(ctx)
+		a.listAt = time.Now()
+	}
+	return slices.Clone(a.listDevices), a.listErr
+}
+
+func (a *ADB) listDevicesUncached(ctx context.Context) ([]ADBDevice, error) {
 	out, err := a.run(ctx, "devices", "-l")
 	if err != nil {
 		return nil, fmt.Errorf("adb devices: %w", err)
@@ -144,7 +176,10 @@ func (a *ADB) ShellSecret(ctx context.Context, serial string, args ...string) ([
 	if err := checkSerial(serial); err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, a.adbPath, append([]string{"-s", serial, "shell"}, args...)...)
+	cmdArgs := append([]string{"-s", serial, "shell"}, args...)
+	ctx, cancel := a.withTimeout(ctx, cmdArgs)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, a.adbPath, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("adb shell command failed: %w", err)
@@ -190,7 +225,43 @@ func (a *ADB) Install(ctx context.Context, serial, apkPath string) ([]byte, erro
 	return a.runWithSerial(ctx, serial, "install", "-r", apkPath)
 }
 
+// ServerShell runs a long-lived device process (scrcpy-server) that lasts
+// as long as ctx: no default timeout.
+func (a *ADB) ServerShell(ctx context.Context, serial string, args ...string) ([]byte, error) {
+	if err := checkSerial(serial); err != nil {
+		return nil, err
+	}
+	return a.exec(ctx, append([]string{"-s", serial, "shell"}, args...)...)
+}
+
+// withTimeout applies the default timeout for args unless ctx already has a
+// deadline.
+func (a *ADB) withTimeout(ctx context.Context, args []string) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, a.timeoutFor(args))
+}
+
+// timeoutFor is the default timeout for an adb invocation: file transfers
+// get long enough for large APKs over slow USB, everything else 30s.
+func (a *ADB) timeoutFor(args []string) time.Duration {
+	if len(args) >= 2 && args[0] == "-s" {
+		args = args[2:]
+	}
+	if len(args) > 0 && (args[0] == "push" || args[0] == "install") {
+		return transferADBTimeout
+	}
+	return cmp.Or(a.timeout, defaultADBTimeout)
+}
+
 func (a *ADB) run(ctx context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := a.withTimeout(ctx, args)
+	defer cancel()
+	return a.exec(ctx, args...)
+}
+
+func (a *ADB) exec(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, a.adbPath, args...)
 	out, err := cmd.Output()
 	if err != nil {
