@@ -1,10 +1,11 @@
-// Package vpn runs a WireGuard tunnel for tethered devices' traffic only.
+// Package vpn runs the WireGuard tunnels phones reach the internet through.
 //
-// The admin pastes a standard wg-quick config. Batter brings up wg0 from it
-// and adds policy routing so that only the gnirehtet relay's uid (whose
-// sockets carry every tethered device's traffic) uses the tunnel. The relay
-// uid's routing table falls back to an unreachable route, so when the tunnel
-// is down tethered devices get no internet rather than leaking out directly.
+// Each VPN profile is a standard wg-quick config the admin pastes. Batter
+// brings up a tunnel (wg<slot>) from it and adds policy routing so that
+// only the profile's phones (their packets marked by the phone LAN's
+// firewall) and its exit-IP checker uid use the tunnel. The profile's
+// routing table falls back to an unreachable route, so when the tunnel is
+// down its phones get no internet rather than leaking out directly.
 // Everything else (Batter's UI, adb, the host) keeps the normal route.
 package vpn
 
@@ -25,7 +26,7 @@ import (
 type Config struct {
 	PrivateKey string
 	Addresses  []string // CIDR prefixes for wg0
-	DNS        []string // DNS server IPs for tethered devices
+	DNS        []string // DNS server IPs for the profile's phones
 	MTU        int      // 0 = default
 	ListenPort int      // 0 = random
 	Peers      []Peer

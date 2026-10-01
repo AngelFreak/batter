@@ -23,15 +23,14 @@ import (
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-// fakeSystem stands in for the network and the relays, logging both in one
-// sequence so tests can check ordering (kill switch before relay).
+// fakeSystem stands in for the network, logging commands in sequence so
+// tests can check ordering (kill switch before tunnel).
 type fakeSystem struct {
-	mu     sync.Mutex
-	log    []string
-	stdin  map[string]string
-	fail   string // commands containing this fail
-	dump   string // `wg show <iface> dump` output
-	relays map[int]bool
+	mu    sync.Mutex
+	log   []string
+	stdin map[string]string
+	fail  string // commands containing this fail
+	dump  string // `wg show <iface> dump` output
 }
 
 func (f *fakeSystem) run(_ context.Context, stdin, name string, args ...string) ([]byte, error) {
@@ -55,40 +54,6 @@ func (f *fakeSystem) run(_ context.Context, stdin, name string, args ...string) 
 		return []byte("5: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN\n"), nil
 	}
 	return nil, nil
-}
-
-func (f *fakeSystem) startRelay(ctx context.Context, uid uint32, port int) {
-	f.mu.Lock()
-	f.log = append(f.log, fmt.Sprintf("relay start uid=%d port=%d", uid, port))
-	if f.relays == nil {
-		f.relays = map[int]bool{}
-	}
-	f.relays[port] = true
-	f.mu.Unlock()
-	go func() {
-		<-ctx.Done()
-		f.mu.Lock()
-		f.relays[port] = false
-		f.mu.Unlock()
-	}()
-}
-
-func (f *fakeSystem) relayRunning(port int) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.relays[port]
-}
-
-// waitRelay waits for a relay's stop to land (it happens on a goroutine).
-func (f *fakeSystem) waitRelay(t *testing.T, port int, running bool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for f.relayRunning(port) != running {
-		if time.Now().After(deadline) {
-			t.Fatalf("relay on port %d running=%v, want %v", port, !running, running)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 }
 
 func (f *fakeSystem) index(t *testing.T, prefix string) int {
@@ -175,9 +140,7 @@ func migrateUpTo(ctx context.Context, pool *pgxpool.Pool, upTo string) error {
 
 func newService(t *testing.T, pool *pgxpool.Pool, sys *fakeSystem) *Service {
 	t.Helper()
-	s := &Service{DB: pool, Run: sys.run, StartRelay: sys.startRelay, Logger: quiet}
-	t.Cleanup(s.Stop)
-	return s
+	return &Service{DB: pool, Run: sys.run, Logger: quiet}
 }
 
 // profileConf is sample with its own DNS server, to tell profiles apart.
@@ -199,7 +162,7 @@ func assign(t *testing.T, pool *pgxpool.Pool, serial, profileID string) {
 	}
 }
 
-func TestProfilesGetTheirOwnSlotAndKillSwitchBeforeRelay(t *testing.T) {
+func TestProfilesGetTheirOwnSlotAndKillSwitchBeforeTunnel(t *testing.T) {
 	sys := &fakeSystem{}
 	s := newService(t, testDB(t, ""), sys)
 	ctx := context.Background()
@@ -217,15 +180,16 @@ func TestProfilesGetTheirOwnSlotAndKillSwitchBeforeRelay(t *testing.T) {
 	}
 
 	for _, want := range []struct {
-		uid, table, iface string
-		port              int
-	}{{"31416", "51820", "wg0", 31416}, {"31417", "51821", "wg1", 31417}} {
-		rule := sys.index(t, "ip rule add uidrange "+want.uid+"-"+want.uid+" lookup "+want.table)
+		uid, table, iface, priority string
+	}{{"31416", "51820", "wg0", "9000"}, {"31417", "51821", "wg1", "9001"}} {
+		// Phones' packets carry their profile's mark (set by the LAN
+		// firewall); the exit-IP check runs as the slot's uid.
+		phones := sys.index(t, "ip rule add fwmark "+want.table+" lookup "+want.table+" priority "+want.priority)
+		checker := sys.index(t, "ip rule add uidrange "+want.uid+"-"+want.uid+" lookup "+want.table)
 		unreachable := sys.index(t, "ip route replace unreachable default table "+want.table)
 		link := sys.index(t, "ip link add "+want.iface+" type wireguard")
-		relay := sys.index(t, fmt.Sprintf("relay start uid=%s port=%d", want.uid, want.port))
-		if rule > relay || unreachable > relay || rule > link {
-			t.Fatalf("slot %s: relay or tunnel before kill switch:\n  %s", want.iface, strings.Join(sys.log, "\n  "))
+		if phones > link || checker > link || unreachable > link {
+			t.Fatalf("slot %s: tunnel before kill switch:\n  %s", want.iface, strings.Join(sys.log, "\n  "))
 		}
 		sys.index(t, "ip route replace 0.0.0.0/0 dev "+want.iface+" table "+want.table)
 	}
@@ -247,9 +211,8 @@ func TestDisablingAProfileKeepsItsKillSwitch(t *testing.T) {
 	if _, err := s.Update(ctx, p.ID, ProfileUpdate{Enabled: &off}); err != nil {
 		t.Fatal(err)
 	}
-	sys.waitRelay(t, 31416, false)
 	sys.index(t, "ip link del wg0")
-	if sys.has("ip rule del") || sys.has("ip route flush") {
+	if sys.has("ip rule del") || sys.has("ip route flush") || sys.has("ip link add") {
 		t.Fatalf("disabling removed the kill switch (its phones would go direct):\n  %s", strings.Join(sys.log, "\n  "))
 	}
 
@@ -257,7 +220,7 @@ func TestDisablingAProfileKeepsItsKillSwitch(t *testing.T) {
 	if _, err := s.Update(ctx, p.ID, ProfileUpdate{Enabled: &on}); err != nil {
 		t.Fatal(err)
 	}
-	sys.waitRelay(t, 31416, true)
+	sys.index(t, "ip link add wg0 type wireguard")
 }
 
 func TestReapplyingAConfigKeepsKillSwitchInPlace(t *testing.T) {
@@ -281,7 +244,7 @@ func TestReapplyingAConfigKeepsKillSwitchInPlace(t *testing.T) {
 	}
 }
 
-func TestKillSwitchFailureKeepsRelayOff(t *testing.T) {
+func TestKillSwitchFailureKeepsTunnelDown(t *testing.T) {
 	sys := &fakeSystem{fail: "ip rule add"}
 	s := newService(t, testDB(t, ""), sys)
 	p, err := s.Create(context.Background(), "Sweden", sample, true)
@@ -291,12 +254,12 @@ func TestKillSwitchFailureKeepsRelayOff(t *testing.T) {
 	if !strings.Contains(p.ApplyError, ErrKillSwitch.Error()) {
 		t.Fatalf("apply error = %q", p.ApplyError)
 	}
-	if sys.has("relay start") {
-		t.Fatal("relay started without a kill switch")
+	if sys.has("ip link add") {
+		t.Fatal("tunnel brought up without a kill switch")
 	}
 }
 
-func TestTunnelFailureIsReportedButRelayRunsBehindKillSwitch(t *testing.T) {
+func TestTunnelFailureIsReported(t *testing.T) {
 	sys := &fakeSystem{fail: "wg setconf"}
 	s := newService(t, testDB(t, ""), sys)
 	p, err := s.Create(context.Background(), "Sweden", sample, true)
@@ -305,9 +268,6 @@ func TestTunnelFailureIsReportedButRelayRunsBehindKillSwitch(t *testing.T) {
 	}
 	if !strings.Contains(p.ApplyError, "wg setconf") {
 		t.Fatalf("apply error = %q", p.ApplyError)
-	}
-	if !sys.relayRunning(31416) {
-		t.Fatal("relay not running (its phones would wait for nothing; the kill switch already blocks it)")
 	}
 }
 
@@ -347,16 +307,17 @@ func TestDeleteTearsDownFreesSlotAndUnassignsPhones(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT vpn_profile_id::text FROM devices WHERE serial = 'PHONE1'").Scan(&assigned); err != nil || assigned != nil {
 		t.Fatalf("PHONE1 still assigned: %v %v", assigned, err)
 	}
-	sys.waitRelay(t, 31416, false)
 	sys.index(t, "ip rule del uidrange 31416-31416 lookup 51820")
+	sys.index(t, "ip rule del fwmark 51820 lookup 51820")
 	sys.index(t, "ip link del wg0")
 
 	q, err := s.Create(ctx, "Denmark", sample, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target, err := s.Target(ctx, q.ID); err != nil || target.Port != 31416 {
-		t.Fatalf("slot 0 not reused: %+v %v", target, err)
+	assign(t, pool, "PHONE2", q.ID)
+	if got, err := s.Assignments(ctx); err != nil || got["PHONE2"].Mark != 51820 {
+		t.Fatalf("slot 0 not reused: %+v %v", got, err)
 	}
 	if _, err := s.Delete(ctx, p.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleting again: %v, want ErrNotFound", err)
@@ -427,7 +388,7 @@ func TestSlotsRunOut(t *testing.T) {
 	}
 }
 
-func TestTetherTargetsFollowAssignments(t *testing.T) {
+func TestAssignmentsRoutePhonesToTheirProfiles(t *testing.T) {
 	pool := testDB(t, "")
 	s := newService(t, pool, &fakeSystem{})
 	ctx := context.Background()
@@ -439,13 +400,15 @@ func TestTetherTargetsFollowAssignments(t *testing.T) {
 	assign(t, pool, "PHONE1", a.ID)
 	assign(t, pool, "PHONE2", b.ID)
 
-	got, err := s.TetherTargets(ctx)
+	got, err := s.Assignments(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got["PHONE1"].Port != 31416 || got["PHONE2"].Port != 31417 ||
-		!slices.Equal(got["PHONE1"].DNS, []string{"10.64.0.1"}) || !slices.Equal(got["PHONE2"].DNS, []string{"10.65.0.1"}) {
-		t.Fatalf("targets = %+v", got)
+	// A disabled profile's phones still carry its mark: its kill switch
+	// then blocks them, rather than their traffic going anywhere else.
+	if len(got) != 2 || got["PHONE1"].Mark != 51820 || got["PHONE2"].Mark != 51821 ||
+		got["PHONE1"].DNS.String() != "10.64.0.1" || got["PHONE2"].DNS.String() != "10.65.0.1" {
+		t.Fatalf("assignments = %+v", got)
 	}
 }
 
@@ -459,19 +422,18 @@ func TestSyncAppliesStoredProfilesOnStart(t *testing.T) {
 	if _, err := first.Create(ctx, "Off", sample, false); err != nil {
 		t.Fatal(err)
 	}
-	first.Stop()
 
 	sys := &fakeSystem{}
 	restarted := newService(t, pool, sys)
 	if err := restarted.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if sys.index(t, "ip rule add uidrange 31416-31416") > sys.index(t, "relay start uid=31416") {
-		t.Fatal("relay started before its kill switch")
+	if sys.index(t, "ip rule add fwmark 51820") > sys.index(t, "ip link add wg0") {
+		t.Fatal("tunnel up before its kill switch")
 	}
-	// A disabled profile is fenced off too, but has no relay or tunnel.
-	sys.index(t, "ip rule add uidrange 31417-31417")
-	if sys.has("relay start uid=31417") || sys.has("ip link add wg1") {
+	// A disabled profile is fenced off too, but has no tunnel.
+	sys.index(t, "ip rule add fwmark 51821")
+	if sys.has("ip link add wg1") {
 		t.Fatalf("disabled profile brought up:\n  %s", strings.Join(sys.log, "\n  "))
 	}
 }
@@ -509,12 +471,12 @@ func TestLegacyConfigImportedAsDefaultProfile(t *testing.T) {
 	if len(names) != 1 || names[0].Name != "Default" {
 		t.Fatalf("profiles after import: %+v", names)
 	}
-	targets, err := s.TetherTargets(ctx)
+	got, err := s.Assignments(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 1 || targets["TETHERED"].Port != 31416 {
-		t.Fatalf("targets after import = %+v, want TETHERED on the Default profile", targets)
+	if len(got) != 1 || got["TETHERED"].Mark != 51820 {
+		t.Fatalf("assignments after import = %+v, want TETHERED on the Default profile", got)
 	}
 	// Importing again is a no-op (the file is gone).
 	if err := s.ImportLegacy(ctx, path); err != nil {
@@ -539,8 +501,8 @@ func TestLegacyTetheringWithoutConfigIsTurnedOff(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM legacy_tethered_devices").Scan(&n); err != nil || n != 0 {
 		t.Fatalf("legacy list not cleared: %d %v", n, err)
 	}
-	if targets, _ := s.TetherTargets(ctx); len(targets) != 0 {
-		t.Fatalf("targets = %v, want none", targets)
+	if got, _ := s.Assignments(ctx); len(got) != 0 {
+		t.Fatalf("assignments = %v, want none", got)
 	}
 }
 
@@ -557,54 +519,56 @@ func TestCheckExitRunsAsTheProfilesUID(t *testing.T) {
 	b, _ := s.Create(ctx, "Denmark", sample, true)
 	ip, err := s.CheckExit(ctx, b.ID)
 	if err != nil || ip != "198.51.100.4" || asUID != 31417 {
-		t.Fatalf("CheckExit = %q, %v as uid %d; want the Denmark relay's uid 31417", ip, err, asUID)
+		t.Fatalf("CheckExit = %q, %v as uid %d; want Denmark's checker uid 31417", ip, err, asUID)
 	}
 }
 
-// Routing alone lets a relay uid reach the container's own addresses (the
-// local table wins over the uid rule), so a firewall also confines every
-// relay uid to wg* interfaces, except replies on connections made to it.
-func TestRelayFirewallRules(t *testing.T) {
-	rules := relayFirewall()
+// Routing alone lets a checker uid reach the container's own addresses
+// (the local table wins over the uid rule), so a firewall also confines
+// every checker uid to wg* interfaces.
+func TestCheckerFirewallRules(t *testing.T) {
+	rules := checkerFirewall()
 	for _, want := range []string{
-		"table inet batter_relay",
+		"table inet batter_exitcheck",
 		"type filter hook output priority 0; policy accept;",
 		"meta skuid 31416-31447 ct state established,related accept",
 		`meta skuid 31416-31447 oifname "wg*" accept`,
 		"meta skuid 31416-31447 reject",
+		// The gnirehtet version's table goes.
+		"delete table inet batter_relay",
 	} {
 		if !strings.Contains(rules, want) {
 			t.Errorf("rules lack %q:\n%s", want, rules)
 		}
 	}
 	// Replaced atomically in one nft transaction: no window while re-applying.
-	if !strings.HasPrefix(rules, "table inet batter_relay {}\ndelete table inet batter_relay\n") {
+	if !strings.Contains(rules, "table inet batter_exitcheck {}\ndelete table inet batter_exitcheck\n") {
 		t.Errorf("rules don't replace the table atomically:\n%s", rules)
 	}
 }
 
-func TestFirewallGoesInBeforeRelay(t *testing.T) {
+func TestFirewallGoesInBeforeTunnel(t *testing.T) {
 	sys := &fakeSystem{}
 	s := newService(t, testDB(t, ""), sys)
 	if _, err := s.Create(context.Background(), "Sweden", sample, true); err != nil {
 		t.Fatal(err)
 	}
-	if sys.index(t, "nft -f /dev/stdin") > sys.index(t, "relay start") {
-		t.Fatal("relay started before the firewall")
+	if sys.index(t, "nft -f /dev/stdin") > sys.index(t, "ip link add wg0") {
+		t.Fatal("tunnel up before the firewall")
 	}
-	if got := sys.stdin["nft -f /dev/stdin"]; got != relayFirewall() {
+	if got := sys.stdin["nft -f /dev/stdin"]; got != checkerFirewall() {
 		t.Fatalf("nft fed %q", got)
 	}
 }
 
-func TestFirewallFailureKeepsRelayOff(t *testing.T) {
+func TestFirewallFailureKeepsTunnelDown(t *testing.T) {
 	sys := &fakeSystem{fail: "nft"}
 	s := newService(t, testDB(t, ""), sys)
 	p, err := s.Create(context.Background(), "Sweden", sample, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(p.ApplyError, ErrKillSwitch.Error()) || sys.has("relay start") {
-		t.Fatalf("relay ran without the firewall (apply error %q)", p.ApplyError)
+	if !strings.Contains(p.ApplyError, ErrKillSwitch.Error()) || sys.has("ip link add") {
+		t.Fatalf("tunnel up without the firewall (apply error %q)", p.ApplyError)
 	}
 }

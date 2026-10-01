@@ -64,7 +64,7 @@ func TestExitIPCheckerReportsFailure(t *testing.T) {
 	}
 }
 
-// The relay uid may not reach local addresses (Docker's DNS resolver among
+// The checker uid may not reach local addresses (Docker's DNS resolver among
 // them), so the check's hostname is resolved beforehand and the child
 // connects to that address, keeping the hostname for HTTP and TLS.
 func TestExitIPCommandConnectsToPreResolvedAddress(t *testing.T) {

@@ -19,8 +19,8 @@ import (
 const ExitIPSubcommand = "vpn-exit-ip"
 
 // ExitIPCommand fetches args[0], which must answer with an IP address, and
-// prints it. Batter runs it as the relay uid (see ExitIPChecker) so the
-// request takes tethered devices' route.
+// prints it. Batter runs it as a profile's checker uid (see ExitIPChecker)
+// so the request takes the profile's phones' route.
 func ExitIPCommand(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 && (len(args) != 3 || args[1] != "--connect") {
 		fmt.Fprintln(stderr, "usage: batter "+ExitIPSubcommand+" URL [--connect IP]")
@@ -68,7 +68,7 @@ func ExitIPChecker(exe, url string, uid uint32) func(ctx context.Context) (strin
 	return func(ctx context.Context) (string, error) {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		// The relay uid can't reach local addresses, Docker's DNS resolver
+		// The checker uid can't reach local addresses, Docker's DNS resolver
 		// included, so resolve the check's host here (outside the tunnel;
 		// only the checker's own hostname leaks this way).
 		args := []string{ExitIPSubcommand, url}

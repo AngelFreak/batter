@@ -1,12 +1,10 @@
 package handlers
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 
-	"github.com/XpertaDK/batter/internal/tether"
 	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 )
@@ -15,16 +13,28 @@ import (
 // describe configs without their private or preshared keys.
 type VPNHandler struct {
 	vpn    *vpn.Service
-	tether *tether.Controller // nil when gnirehtet isn't installed
+	lan    PhoneLAN // nil without a phone network
 	logger *slog.Logger
 }
 
-// NewVPNHandler creates a VPN handler. ctrl may be nil.
-func NewVPNHandler(svc *vpn.Service, ctrl *tether.Controller, logger *slog.Logger) *VPNHandler {
+// NewVPNHandler creates a VPN handler. lan may be nil.
+func NewVPNHandler(svc *vpn.Service, lan PhoneLAN, logger *slog.Logger) *VPNHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &VPNHandler{vpn: svc, tether: ctrl, logger: logger.With("handler", "vpn")}
+	return &VPNHandler{vpn: svc, lan: lan, logger: logger.With("handler", "vpn")}
+}
+
+// reload re-applies the phone LAN's routing (profiles' DNS servers and
+// marks) after a profile change. Without a phone network there's nothing
+// to do.
+func (h *VPNHandler) reload(c *gin.Context) {
+	if h.lan == nil {
+		return
+	}
+	if err := reloadLAN(c.Request.Context(), h.lan); err != nil {
+		h.logger.Error("phone LAN routing not re-applied after a VPN profile change", "error", err)
+	}
 }
 
 // ProfileRequest is the body of POST and PUT /vpn/profiles. On PUT, omitted
@@ -80,6 +90,7 @@ func (h *VPNHandler) CreateProfile(c *gin.Context) {
 		h.fail(c, "create VPN profile", err)
 		return
 	}
+	h.reload(c)
 	c.JSON(http.StatusCreated, p)
 }
 
@@ -96,37 +107,23 @@ func (h *VPNHandler) UpdateProfile(c *gin.Context) {
 		h.fail(c, "update VPN profile", err)
 		return
 	}
+	h.reload(c)
 	c.JSON(http.StatusOK, p)
 }
 
-// DeleteProfile removes a profile and turns off tethering on its phones.
-// Phones that can't be reached now are turned off by the reconcile loop
-// when they next connect.
+// DeleteProfile removes a profile; its phones are left without internet.
 func (h *VPNHandler) DeleteProfile(c *gin.Context) {
 	serials, err := h.vpn.Delete(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		h.fail(c, "delete VPN profile", err)
 		return
 	}
-	applyErrors := gin.H{}
-	if h.tether != nil {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), tetherApplyTimeout)
-		defer cancel()
-		for _, serial := range serials {
-			if err := h.tether.Disable(ctx, serial); err != nil {
-				applyErrors[serial] = err.Error()
-			}
-		}
-	}
-	resp := gin.H{"devices_turned_off": serials}
-	if len(applyErrors) > 0 {
-		resp["apply_errors"] = applyErrors
-	}
-	c.JSON(http.StatusOK, resp)
+	h.reload(c)
+	c.JSON(http.StatusOK, gin.H{"devices_turned_off": serials})
 }
 
 // CheckExitIP reports the public IP the profile's phones exit from, by
-// making a request as its relay's uid. An error with the profile enabled
+// making a request routed like them. An error with the profile enabled
 // usually means its tunnel is down and the kill switch is holding.
 func (h *VPNHandler) CheckExitIP(c *gin.Context) {
 	ip, err := h.vpn.CheckExit(c.Request.Context(), c.Param("id"))
