@@ -146,7 +146,7 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
             <p className="mt-1 text-[10px] text-gray-500">
               {profiles !== null && profiles.length === 0
                 ? 'No VPN profiles yet. Ask an admin to add one to give the phone internet.'
-                : 'On the phone network (ethernet adapter), the phone reaches the internet only through the chosen VPN, never directly. None: no internet.'}
+                : 'On the phone network (ethernet adapter), the phone reaches the internet only through the chosen VPN, never directly. None: no internet. On USB a phone has no internet: USB is for setup and control.'}
             </p>
             {tetherNote && <p className="mt-1 text-[10px] text-yellow-400">{tetherNote}</p>}
           </div>
