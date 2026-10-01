@@ -18,3 +18,4 @@ web/tsconfig.tsbuildinfo
 .claude-flow/
 .playwright-mcp/
 *.apk
+web/.test-out/

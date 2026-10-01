@@ -67,7 +67,11 @@ export class MultiplexerInputHandler {
     ws.onclose = () => {
       conn.hasControl = false;
       this.onStatusChange?.(serial, "disconnected");
-      this.connections.delete(serial);
+      // close events land asynchronously; if this device was removed and
+      // re-added meanwhile, don't drop the newer connection.
+      if (this.connections.get(serial) === conn) {
+        this.connections.delete(serial);
+      }
     };
 
     ws.onerror = () => {};
@@ -89,6 +93,19 @@ export class MultiplexerInputHandler {
       conn.ws.close();
       this.connections.delete(serial);
     }
+  }
+
+  /**
+   * Make the broadcast set exactly `serials`: connect new devices, disconnect
+   * ones that left. Callers pass the devices currently shown on screen, so
+   * input never reaches a device the user can't see.
+   */
+  setDevices(serials: Iterable<string>) {
+    const wanted = new Set(serials);
+    for (const serial of Array.from(this.connections.keys())) {
+      if (!wanted.has(serial)) this.removeDevice(serial);
+    }
+    wanted.forEach((serial) => this.addDevice(serial));
   }
 
   private broadcast(msg: ControlMessage) {

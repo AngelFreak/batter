@@ -66,13 +66,19 @@ export default function MultiplexerPage() {
 
     const handler = new MultiplexerInputHandler();
     multiplexerRef.current = handler;
-
-    for (const device of selectedDevices) {
-      handler.addDevice(device.serial);
-    }
+    handler.setDevices(selectedDevices.map(d => d.serial));
 
     setActive(true);
   }, [selectedDevices]);
+
+  // Keep the broadcast set identical to the tiles on screen. When a device's
+  // session ends, the poll drops it from selectedDevices (and the grid); it
+  // must stop receiving input too, or keystrokes reach a device the user
+  // can no longer see. Keyed on the serial list so polls don't re-run it.
+  const selectedKey = selectedDevices.map(d => d.serial).join('\n');
+  useEffect(() => {
+    multiplexerRef.current?.setDevices(selectedKey ? selectedKey.split('\n') : []);
+  }, [selectedKey]);
 
   const handleStop = useCallback(() => {
     if (multiplexerRef.current) {
