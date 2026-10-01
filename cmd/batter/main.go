@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -36,7 +38,6 @@ func main() {
 		logger.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
 	logger.Info("connected to database")
 
 	// Initialize device manager
@@ -71,23 +72,66 @@ func main() {
 	// Start session health checker (cleans up dead sessions every 30s)
 	stopHealthCheck := dm.StartHealthChecker(30 * time.Second)
 
-	// Graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		logger.Error("failed to listen", "addr", addr, "error", err)
+		os.Exit(1)
+	}
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	logger.Info("starting batter server", "addr", addr)
+	serveErr := serve(sigCtx, newHTTPServer(router), ln, shutdownDrainTimeout)
 
-	go func() {
-		if err := router.Run(addr); err != nil {
-			logger.Error("server error", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	<-quit
+	// Teardown order: stop taking requests (done by serve), then device
+	// sessions, then the DB pool that in-flight handlers were still using.
 	logger.Info("shutting down...")
 	stopHealthCheck()
 	dm.Shutdown()
+	db.Close()
+
+	if serveErr != nil {
+		logger.Error("server error", "error", serveErr)
+		os.Exit(1)
+	}
 	logger.Info("shutdown complete")
+}
+
+// shutdownDrainTimeout bounds how long in-flight HTTP requests may finish
+// after SIGTERM. Keep it under compose's stop_grace_period, leaving room for
+// device session teardown.
+const shutdownDrainTimeout = 10 * time.Second
+
+// newHTTPServer returns the HTTP server with connection-level timeouts.
+// There's deliberately no ReadTimeout/WriteTimeout: those bound the whole
+// request, which would cut off large APK uploads and WebSocket streams.
+func newHTTPServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
+// serve runs srv on ln until ctx is cancelled, then stops accepting
+// connections and waits up to drainTimeout for in-flight requests. Hijacked
+// connections (WebSockets) aren't waited for; device teardown ends them.
+func serve(ctx context.Context, srv *http.Server, ln net.Listener, drainTimeout time.Duration) error {
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ln) }()
+
+	select {
+	case err := <-errCh:
+		return err // Serve never returns nil before Shutdown
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("draining requests: %w", err)
+	}
+	return nil
 }

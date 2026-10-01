@@ -31,6 +31,8 @@ services:
       postgres:
         condition: service_healthy
     privileged: true
+    # Room for the backend to drain requests (10s) and stop device sessions.
+    stop_grace_period: 30s
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - batter_data:/app/data
