@@ -1,83 +1,16 @@
 import { test, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeWebSocket, installBrowserEnv } from './test-browser-env';
+import { installAudioEnv, fakeAudioDeps } from './test-audio-env';
 
 installBrowserEnv();
-class FakeEncodedAudioChunk {
-  constructor(public init: { type: string; timestamp: number; data: Uint8Array }) {}
-}
-(globalThis as Record<string, unknown>).EncodedAudioChunk = FakeEncodedAudioChunk;
+installAudioEnv();
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { DeviceAudioPlayer, JitterScheduler } = require('./device-audio') as typeof import('./device-audio');
 
-class FakeAudioContext {
-  state = 'suspended';
-  currentTime = 10;
-  destination = {};
-  started: number[] = [];
-  gains: { gain: { value: number } }[] = [];
-  constructor(public allowResume: boolean) {}
-  async resume() {
-    if (this.allowResume) this.state = 'running';
-  }
-  async suspend() {
-    this.state = 'suspended';
-  }
-  async close() {
-    this.state = 'closed';
-  }
-  createGain() {
-    const g = { gain: { value: 1 }, connect() {} };
-    this.gains.push(g);
-    return g;
-  }
-  createBuffer() {
-    return { copyToChannel() {} };
-  }
-  createBufferSource() {
-    return {
-      buffer: null,
-      onended: null,
-      connect() {},
-      stop() {},
-      start: (t: number) => this.started.push(t),
-    };
-  }
-}
-
-class FakeAudioDecoder {
-  state = 'unconfigured';
-  config: { codec: string; description?: Uint8Array } | null = null;
-  chunks: FakeEncodedAudioChunk[] = [];
-  constructor(public init: { output: (d: unknown) => void; error: (e: Error) => void }) {}
-  configure(config: { codec: string; description?: Uint8Array }) {
-    this.config = config;
-    this.state = 'configured';
-  }
-  decode(chunk: FakeEncodedAudioChunk) {
-    this.chunks.push(chunk);
-  }
-  close() {
-    this.state = 'closed';
-  }
-}
-
 function setup(opts: { allowResume?: boolean; supported?: boolean } = {}) {
-  const contexts: FakeAudioContext[] = [];
-  const decoders: FakeAudioDecoder[] = [];
-  const player = new DeviceAudioPlayer({
-    supported: () => opts.supported ?? true,
-    createContext: () => {
-      const c = new FakeAudioContext(opts.allowResume ?? true);
-      contexts.push(c);
-      return c as unknown as AudioContext;
-    },
-    createDecoder: (init) => {
-      const d = new FakeAudioDecoder(init as never);
-      decoders.push(d);
-      return d as unknown as AudioDecoder;
-    },
-  });
+  const { deps, contexts, decoders } = fakeAudioDeps(opts);
+  const player = new DeviceAudioPlayer(deps);
   const states: string[] = [];
   player.setOnStateChange((s) => states.push(s));
   return { player, contexts, decoders, states };

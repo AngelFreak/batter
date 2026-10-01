@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { DeviceVideoPlayer } from '@/lib/device-video';
 import { DeviceInputHandler } from '@/lib/device-input';
+import { DeviceAudioPlayer } from '@/lib/device-audio';
+import { AudioControls, type AudioView } from '@/lib/audio-controls';
 import { fetchScreenshot, pushFile, installAPK } from '@/lib/api';
 import { useNoSwipeNavigation } from '@/lib/use-no-swipe-navigation';
 
@@ -18,6 +20,7 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<DeviceVideoPlayer | null>(null);
   const inputRef = useRef<DeviceInputHandler | null>(null);
+  const audioRef = useRef<AudioControls | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [videoStatus, setVideoStatus] = useState('connecting');
   const [controlStatus, setControlStatus] = useState('connecting');
@@ -30,6 +33,7 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
   const [clipboardText, setClipboardText] = useState('');
   const [dragging, setDragging] = useState(false);
   const [showClipboard, setShowClipboard] = useState(false);
+  const [audio, setAudio] = useState<AudioView>({ state: 'connecting', muted: true, volume: 1 });
   // Read through a ref so a new callback identity doesn't recreate the player.
   const onStreamLostRef = useRef(onStreamLost);
   onStreamLostRef.current = onStreamLost;
@@ -62,6 +66,11 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
     });
     input.connect(serial);
 
+    // Audio is independent of video and control: if it fails they carry on.
+    const audioControls = new AudioControls(new DeviceAudioPlayer(), setAudio);
+    audioRef.current = audioControls;
+    audioControls.start(serial);
+
     // Make canvas focusable for keyboard events
     canvas.tabIndex = 0;
     canvas.focus();
@@ -69,8 +78,10 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
     return () => {
       player.disconnect();
       input.disconnect();
+      audioControls.stop();
       playerRef.current = null;
       inputRef.current = null;
+      audioRef.current = null;
     };
   }, [serial, showToast]);
 
@@ -174,6 +185,16 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
     }
   }, [handleFileDrop]);
 
+  // "blocked" means the browser wants a click first, which the button is.
+  const audioUsable = audio.state === 'available' || audio.state === 'blocked';
+  const audioTitle =
+    audio.state === 'unavailable' ? `Audio unavailable${audio.reason ? `: ${audio.reason}` : ''}` :
+    audio.state === 'unsupported' ? 'This browser cannot play device audio' :
+    audio.state === 'needs-https' ? 'Device audio needs HTTPS' :
+    audio.state === 'blocked' ? 'Click to allow sound' :
+    audioUsable ? (audio.muted ? 'Unmute device audio' : 'Mute device audio') :
+    'Connecting audio...';
+
   const statusColor = videoStatus === 'streaming' ? 'text-green-400' : 'text-yellow-400';
 
   return (
@@ -201,6 +222,31 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => void audioRef.current?.toggleMute()}
+            disabled={!audioUsable}
+            title={audioTitle}
+            aria-pressed={audioUsable && !audio.muted}
+            className={`px-2 py-1 text-[10px] rounded disabled:opacity-50 ${
+              audioUsable && !audio.muted ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+            }`}
+          >
+            {audio.state === 'connecting' || audio.state === 'reconnecting' ? 'Audio...' :
+              !audioUsable ? 'No audio' : audio.muted ? 'Unmute' : 'Mute'}
+          </button>
+          {audioUsable && (
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={audio.volume}
+              onChange={e => audioRef.current?.setVolume(Number(e.target.value))}
+              aria-label="Volume"
+              title={`Volume ${Math.round(audio.volume * 100)}%`}
+              className="w-16 accent-brand-500"
+            />
+          )}
           <button
             onClick={() => setShowFrame(f => !f)}
             className={`px-2 py-1 text-[10px] rounded ${
