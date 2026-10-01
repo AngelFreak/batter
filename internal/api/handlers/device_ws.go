@@ -5,35 +5,46 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sync"
 
+	"github.com/XpertaDK/batter/internal/api/middleware"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	ws "github.com/gorilla/websocket"
 )
 
-var deviceUpgrader = ws.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 1024 * 1024, // 1MB for video frames
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Origin is validated by middleware
-	},
-}
-
 // DeviceWSHandler handles WebSocket connections for device video/control.
 type DeviceWSHandler struct {
 	deviceManager *device.Manager
 	logger        *slog.Logger
+	upgrader      ws.Upgrader
 }
 
-// NewDeviceWSHandler creates a new device WebSocket handler.
-func NewDeviceWSHandler(dm *device.Manager, logger *slog.Logger) *DeviceWSHandler {
+// NewDeviceWSHandler creates a new device WebSocket handler. allowedOrigins is
+// the same origin policy used for CORS (empty = same-origin only); the
+// WebSocket upgrader enforces it so a
+// page on an untrusted origin cannot open a control socket with a stolen-from-
+// the-tab JWT (cross-site WebSocket hijacking).
+func NewDeviceWSHandler(dm *device.Manager, logger *slog.Logger, allowedOrigins []string) *DeviceWSHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &DeviceWSHandler{
 		deviceManager: dm,
 		logger:        logger.With("handler", "device-ws"),
+		upgrader: ws.Upgrader{
+			ReadBufferSize:  4096,
+			WriteBufferSize: 1024 * 1024, // 1MB for video frames
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				// Non-browser clients (no Origin header) are gated by JWT auth.
+				if origin == "" {
+					return true
+				}
+				return middleware.IsOriginAllowed(origin, r, allowedOrigins)
+			},
+		},
 	}
 }
 
@@ -47,7 +58,7 @@ func (h *DeviceWSHandler) VideoStream(c *gin.Context) {
 		return
 	}
 
-	conn, err := deviceUpgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		h.logger.Error("failed to upgrade video websocket", "error", err)
 		return
@@ -101,6 +112,7 @@ type ControlMessage struct {
 	Text      string  `json:"text"`
 	ScrollH   int32   `json:"scroll_h"`
 	ScrollV   int32   `json:"scroll_v"`
+	Paste     bool    `json:"paste"`
 }
 
 // ControlStream handles WebSocket connections for control input.
@@ -113,7 +125,7 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 		return
 	}
 
-	conn, err := deviceUpgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		h.logger.Error("failed to upgrade control websocket", "error", err)
 		return
@@ -129,6 +141,33 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 		return
 	}
 	defer session.ReleaseControl(clientID)
+
+	// Write mutex for concurrent WebSocket writes (clipboard relay + control responses)
+	var wsMu sync.Mutex
+	done := make(chan struct{})
+	defer close(done)
+
+	// Clipboard relay goroutine: reads device clipboard and sends to WebSocket client
+	go func() {
+		clipCh := session.ClipboardCh()
+		for {
+			select {
+			case <-done:
+				return
+			case text, ok := <-clipCh:
+				if !ok {
+					return
+				}
+				msg, _ := json.Marshal(map[string]string{"type": "clipboard", "text": text})
+				wsMu.Lock()
+				err := conn.WriteMessage(ws.TextMessage, msg)
+				wsMu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	width := uint16(session.Width)
 	height := uint16(session.Height)
@@ -191,6 +230,14 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 				h.logger.Warn("failed to write screen_off control", "error", err)
 			}
 			encoded = device.EncodeKeyEvent(device.ActionUp, device.KeycodeSleep, 0, 0)
+
+		case "set_clipboard":
+			if msg.Text != "" {
+				encoded = device.EncodeSetClipboard(0, msg.Text, msg.Paste)
+			}
+
+		case "get_clipboard":
+			encoded = device.EncodeGetClipboard(device.CopyKeyCopy)
 
 		default:
 			h.logger.Debug("unknown control type", "type", msg.Type)

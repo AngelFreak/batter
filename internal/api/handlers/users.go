@@ -57,6 +57,11 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 			"created_at":    createdAt,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read users", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list users"})
+		return
+	}
 
 	if users == nil {
 		users = []gin.H{}
@@ -304,6 +309,11 @@ func (h *UserHandler) ListUserAccess(c *gin.Context) {
 			}
 		}
 		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		h.logger.Error("failed to read user access", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list user access"})
+		return
 	}
 
 	if grants == nil {

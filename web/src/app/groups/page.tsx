@@ -290,12 +290,14 @@ export default function GroupsPage() {
           <h2 className="text-lg font-semibold text-white">Device Groups</h2>
           <p className="text-xs text-gray-500">{groups.length} group{groups.length !== 1 ? 's' : ''}</p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="px-3 py-2 text-xs bg-brand-600 hover:bg-brand-700 text-white rounded-lg"
-        >
-          New Group
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setShowCreate(true)}
+            className="px-3 py-2 text-xs bg-brand-600 hover:bg-brand-700 text-white rounded-lg"
+          >
+            New Group
+          </button>
+        )}
       </div>
 
       <div className="flex-1 overflow-auto">
@@ -326,7 +328,7 @@ export default function GroupsPage() {
 
           {groups.length === 0 && !showCreate && (
             <div className="text-center py-12 text-gray-500 text-sm">
-              No groups yet. Create one to organize your devices.
+              {isAdmin ? 'No groups yet. Create one to organize your devices.' : 'No groups yet.'}
             </div>
           )}
 
@@ -428,8 +430,8 @@ export default function GroupsPage() {
                     <div className="p-5">
                       {activeTab === 'devices' && (
                         <>
-                          {/* Search to add device */}
-                          <div ref={deviceSearchRef} className="relative mb-4">
+                          {/* Search to add device (admin-only, like the API) */}
+                          {isAdmin && <div ref={deviceSearchRef} className="relative mb-4">
                             <div className="flex items-center gap-2">
                               <div className="relative flex-1">
                                 <input
@@ -475,7 +477,7 @@ export default function GroupsPage() {
                                 </div>
                               );
                             })()}
-                          </div>
+                          </div>}
 
                           {/* Device list */}
                           {members.length === 0 ? (
@@ -496,12 +498,14 @@ export default function GroupsPage() {
                                         <span className="px-1.5 py-0.5 rounded text-[10px] bg-green-600/20 text-green-400">streaming</span>
                                       )}
                                     </div>
-                                    <button
-                                      onClick={() => handleRemoveDevice(group.id, serial)}
-                                      className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-900/20 transition-opacity"
-                                    >
-                                      <XIcon />
-                                    </button>
+                                    {isAdmin && (
+                                      <button
+                                        onClick={() => handleRemoveDevice(group.id, serial)}
+                                        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-900/20 transition-opacity"
+                                      >
+                                        <XIcon />
+                                      </button>
+                                    )}
                                   </div>
                                 );
                               })}

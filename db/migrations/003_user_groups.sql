@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS user_group_members (
     PRIMARY KEY (user_id, group_id)
 );
 
-CREATE INDEX idx_user_group_members_group_id ON user_group_members(group_id);
+CREATE INDEX IF NOT EXISTS idx_user_group_members_group_id ON user_group_members(group_id);
 
 CREATE TABLE IF NOT EXISTS user_group_access (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -31,6 +31,6 @@ CREATE TABLE IF NOT EXISTS user_group_access (
     )
 );
 
-CREATE INDEX idx_user_group_access_user_group_id ON user_group_access(user_group_id);
-CREATE INDEX idx_user_group_access_device_serial ON user_group_access(device_serial);
-CREATE INDEX idx_user_group_access_group_id ON user_group_access(group_id);
+CREATE INDEX IF NOT EXISTS idx_user_group_access_user_group_id ON user_group_access(user_group_id);
+CREATE INDEX IF NOT EXISTS idx_user_group_access_device_serial ON user_group_access(device_serial);
+CREATE INDEX IF NOT EXISTS idx_user_group_access_group_id ON user_group_access(group_id);

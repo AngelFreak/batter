@@ -30,18 +30,24 @@ func (m *Manager) StartHealthChecker(interval time.Duration) context.CancelFunc 
 }
 
 // cleanupDeadSessions finds sessions that are no longer alive and removes them.
+// Dead sessions are detached under m.mu but closed outside it, since Close
+// can block for seconds.
 func (m *Manager) cleanupDeadSessions() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	var dead []*Session
 	for serial, session := range m.sessions {
 		if !session.IsAlive() {
 			m.logger.Warn("cleaning up dead session", "serial", serial)
-			session.Close()
+			dead = append(dead, session)
 			delete(m.sessions, serial)
 			delete(m.sessionTiers, serial)
 			delete(m.fullViewers, serial)
 		}
+	}
+	m.mu.Unlock()
+
+	for _, session := range dead {
+		session.Close()
 	}
 }
 

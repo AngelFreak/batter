@@ -7,8 +7,25 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"strings"
 )
+
+// validSerial matches the characters ADB itself permits in a device serial:
+// USB serials, "host:port" network serials, and emulator names. Anything else
+// (notably a leading "-", which adb would parse as an option) is rejected.
+var validSerial = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
+// checkSerial guards against argument injection: the serial is passed to
+// `adb -s <serial>`, so a value like "--help" or "-e" would be interpreted as
+// an adb option rather than a device. We reject leading dashes and any
+// out-of-charset input before the value reaches exec.Command.
+func checkSerial(serial string) error {
+	if strings.HasPrefix(serial, "-") || !validSerial.MatchString(serial) {
+		return fmt.Errorf("invalid device serial: %q", serial)
+	}
+	return nil
+}
 
 // ADBDevice represents a connected Android device.
 type ADBDevice struct {
@@ -130,6 +147,11 @@ func (a *ADB) Screenshot(ctx context.Context, serial string) ([]byte, error) {
 	return a.runWithSerial(ctx, serial, "exec-out", "screencap", "-p")
 }
 
+// Install installs an APK on the device. Returns the output for success checking.
+func (a *ADB) Install(ctx context.Context, serial, apkPath string) ([]byte, error) {
+	return a.runWithSerial(ctx, serial, "install", "-r", apkPath)
+}
+
 func (a *ADB) run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, a.adbPath, args...)
 	out, err := cmd.Output()
@@ -188,6 +210,9 @@ func (a *ADB) GetProperties(ctx context.Context, serial string) (map[string]stri
 }
 
 func (a *ADB) runWithSerial(ctx context.Context, serial string, args ...string) ([]byte, error) {
+	if err := checkSerial(serial); err != nil {
+		return nil, err
+	}
 	cmdArgs := append([]string{"-s", serial}, args...)
 	return a.run(ctx, cmdArgs...)
 }

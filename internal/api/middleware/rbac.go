@@ -18,20 +18,13 @@ type RBACConfig struct {
 // Admins bypass this check entirely.
 func RequireDevicePermission(db *pgxpool.Pool, minPermission string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		role, _ := c.Get(ContextKeyRole)
-		if role == "admin" {
-			c.Next()
-			return
-		}
-
-		userID, _ := c.Get(ContextKeyUserID)
 		serial := c.Param("serial")
 		if serial == "" {
 			c.Next()
 			return
 		}
 
-		hasAccess, err := checkDeviceAccess(c, db, userID.(string), serial, minPermission)
+		hasAccess, err := HasDevicePermission(c, db, serial, minPermission)
 		if err != nil || !hasAccess {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "no access to this device"})
 			return
@@ -39,6 +32,16 @@ func RequireDevicePermission(db *pgxpool.Pool, minPermission string) gin.Handler
 
 		c.Next()
 	}
+}
+
+// HasDevicePermission reports whether the authenticated caller holds at least
+// minPermission on the device. Admins always do. For handlers that act on many
+// devices at once (group batch ops), where the route-level check can't apply.
+func HasDevicePermission(c *gin.Context, db *pgxpool.Pool, serial, minPermission string) (bool, error) {
+	if c.GetString(ContextKeyRole) == "admin" {
+		return true, nil
+	}
+	return checkDeviceAccess(c, db, c.GetString(ContextKeyUserID), serial, minPermission)
 }
 
 // checkDeviceAccess verifies if a user has the specified permission for a device.
@@ -59,11 +62,14 @@ func checkDeviceAccess(c *gin.Context, db *pgxpool.Pool, userID, serial, minPerm
 	for rows.Next() {
 		var perm string
 		if err := rows.Scan(&perm); err != nil {
-			continue
+			return false, err
 		}
 		if permissionLevel(perm) >= permLevel {
 			return true, nil
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
 	}
 
 	// Check group-based access
@@ -80,11 +86,14 @@ func checkDeviceAccess(c *gin.Context, db *pgxpool.Pool, userID, serial, minPerm
 	for rows2.Next() {
 		var perm string
 		if err := rows2.Scan(&perm); err != nil {
-			continue
+			return false, err
 		}
 		if permissionLevel(perm) >= permLevel {
 			return true, nil
 		}
+	}
+	if err := rows2.Err(); err != nil {
+		return false, err
 	}
 
 	// Check user group direct device access
@@ -101,11 +110,14 @@ func checkDeviceAccess(c *gin.Context, db *pgxpool.Pool, userID, serial, minPerm
 	for rows3.Next() {
 		var perm string
 		if err := rows3.Scan(&perm); err != nil {
-			continue
+			return false, err
 		}
 		if permissionLevel(perm) >= permLevel {
 			return true, nil
 		}
+	}
+	if err := rows3.Err(); err != nil {
+		return false, err
 	}
 
 	// Check user group device-group access
@@ -123,11 +135,14 @@ func checkDeviceAccess(c *gin.Context, db *pgxpool.Pool, userID, serial, minPerm
 	for rows4.Next() {
 		var perm string
 		if err := rows4.Scan(&perm); err != nil {
-			continue
+			return false, err
 		}
 		if permissionLevel(perm) >= permLevel {
 			return true, nil
 		}
+	}
+	if err := rows4.Err(); err != nil {
+		return false, err
 	}
 
 	return false, nil
@@ -166,9 +181,12 @@ func GetAccessibleSerials(c *gin.Context, db *pgxpool.Pool, userID, role string)
 	for rows.Next() {
 		var s string
 		if err := rows.Scan(&s); err != nil {
-			continue
+			return nil, err
 		}
 		serials = append(serials, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	if serials == nil {

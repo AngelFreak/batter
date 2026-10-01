@@ -20,6 +20,12 @@ const (
 	ControlTypeRotateDevice       = 11
 )
 
+// Clipboard copy-key constants for EncodeGetClipboard.
+const (
+	CopyKeyNone = 0
+	CopyKeyCopy = 1
+)
+
 // Screen power modes (Android SurfaceControl.POWER_MODE_*).
 const (
 	ScreenPowerOff    = 0
@@ -143,4 +149,25 @@ func EncodeBackOrScreenOn(action uint8) []byte {
 // Format: type(1) + mode(1) = 2 bytes
 func EncodeSetScreenPowerMode(mode uint8) []byte {
 	return []byte{ControlTypeSetScreenPowerMode, mode}
+}
+
+// EncodeSetClipboard encodes a scrcpy SET_CLIPBOARD control message.
+// Format: type(1) + sequence(8) + paste(1) + textLen(4) + text(N)
+func EncodeSetClipboard(sequence uint64, text string, paste bool) []byte {
+	textBytes := []byte(text)
+	buf := make([]byte, 14+len(textBytes))
+	buf[0] = ControlTypeSetClipboard
+	binary.BigEndian.PutUint64(buf[1:9], sequence)
+	if paste {
+		buf[9] = 1
+	}
+	binary.BigEndian.PutUint32(buf[10:14], uint32(len(textBytes)))
+	copy(buf[14:], textBytes)
+	return buf
+}
+
+// EncodeGetClipboard encodes a scrcpy GET_CLIPBOARD control message.
+// Format: type(1) + copyKey(1)
+func EncodeGetClipboard(copyKey uint8) []byte {
+	return []byte{ControlTypeGetClipboard, copyKey}
 }

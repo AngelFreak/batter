@@ -11,6 +11,10 @@ Remote Android phone management platform. View, control, and manage multiple And
 
 - **Live video streaming** - Real-time H.264 video from Android devices via scrcpy, decoded in-browser with WebCodecs API
 - **Touch & keyboard control** - Full remote control with touch, scroll, and keyboard input forwarding
+- **Clipboard sync** - Copy text between your browser and the device in both directions
+- **File push & APK install** - Drag-and-drop files to the device's Download folder, or install APKs directly
+- **Multi-view** - Watch a grid of devices at once and take control of any one of them
+- **Multiplexer** - Broadcast the same touch/keyboard input to several devices simultaneously
 - **Device grid** - Dashboard with live thumbnail previews for all connected devices
 - **Adaptive quality** - Automatic thumbnail (360p/5fps) and full-quality (1024p/30fps) session tiers
 - **Screenshot cache** - Cached last screenshot shown when devices are disconnected or sessions are idle
@@ -23,163 +27,19 @@ Remote Android phone management platform. View, control, and manage multiple And
 
 ## Deployment
 
-### Requirements
-
-- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
-- A Linux host with USB ports for connecting Android devices
-- One or more Android devices with **USB debugging** enabled
-
-### Step 1: Clone and configure
-
 ```bash
-git clone https://github.com/XpertaDK/batter.git
+git clone https://github.com/AngelFreak/batter.git
 cd batter
-cp .env.example .env
-```
-
-Edit `.env` and set the required `JWT_SECRET`:
-
-```bash
-# Generate a secure secret
-openssl rand -hex 32
-```
-
-Paste the result into `.env`:
-
-```env
-JWT_SECRET=your-generated-secret-here
-POSTGRES_PASSWORD=a-strong-database-password
-```
-
-### Step 2: Connect your Android devices
-
-Plug in your Android device(s) via USB. Make sure USB debugging is enabled:
-
-1. On the device, go to **Settings > About phone** and tap **Build number** 7 times
-2. Go to **Settings > Developer options** and enable **USB debugging**
-3. When prompted on the device, tap **Allow** to authorize the computer
-
-Verify the host sees them:
-
-```bash
-adb devices
-```
-
-### Step 3: Start Batter
-
-```bash
 docker compose up -d
 ```
 
-First start takes a few minutes to build. After that, starts are instant.
+Then open `http://<host>:3000` and create the admin account. No `.env` is needed:
+the login-token secret is generated on first start, the app accepts requests
+from whatever host you open it on, and database migrations run automatically.
 
-| Container | What it does |
-|-----------|-------------|
-| **postgres** | PostgreSQL 16 database, data persisted in a Docker volume |
-| **batter** | Go backend + Next.js frontend + scrcpy-server, all in one container |
-
-Database migrations are applied automatically on first start.
-
-### Step 4: Open the browser
-
-Go to **http://localhost:3000**
-
-On first launch you'll see a setup screen to create your **admin account**. After that:
-
-1. Click **Add Device** to register your connected Android devices
-2. Click a device card to start a live remote session
-3. Create **groups**, **users**, and **teams** from the sidebar
-
-### Configuration
-
-All configuration is done via the `.env` file. You never need to edit `docker-compose.yml`.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `JWT_SECRET` | *(required)* | Secret for signing auth tokens. Generate with `openssl rand -hex 32` |
-| `POSTGRES_PASSWORD` | `batter` | Database password. Change this in production |
-| `POSTGRES_USER` | `batter` | Database username |
-| `POSTGRES_DB` | `batter` | Database name |
-| `BATTER_PORT` | `3000` | Port the app is accessible on |
-| `ALLOWED_ORIGINS` | `http://localhost:3000` | CORS origins (change if accessing from another host) |
-| `FRONTEND_URL` | `http://localhost:3000` | Frontend URL (change if accessing from another host) |
-
-**Accessing from another machine on the network:**
-
-```env
-BATTER_PORT=3000
-ALLOWED_ORIGINS=http://192.168.1.100:3000
-FRONTEND_URL=http://192.168.1.100:3000
-```
-
-**Changing the port:**
-
-```env
-BATTER_PORT=9000
-ALLOWED_ORIGINS=http://localhost:9000
-FRONTEND_URL=http://localhost:9000
-```
-
-### Managing the deployment
-
-```bash
-# View logs
-docker compose logs -f
-
-# Stop everything (data is preserved)
-docker compose down
-
-# Start again
-docker compose up -d
-
-# Update to latest version
-git pull
-docker compose up -d --build
-
-# Full reset (deletes all data)
-docker compose down -v
-```
-
-### Backups
-
-Database data is stored in the `pgdata` Docker volume. To back it up:
-
-```bash
-# Dump the database
-docker compose exec postgres pg_dump -U batter batter > backup.sql
-
-# Restore from backup
-docker compose exec -T postgres psql -U batter batter < backup.sql
-```
-
-Screenshot cache is stored in the `batter_data` volume and is recreated automatically — no need to back it up.
-
-### Putting behind a reverse proxy (HTTPS)
-
-For production, put Batter behind a reverse proxy like Nginx or Caddy for HTTPS. Example with Caddy:
-
-```
-batter.example.com {
-    reverse_proxy localhost:3000
-}
-```
-
-Then update `.env`:
-
-```env
-ALLOWED_ORIGINS=https://batter.example.com
-FRONTEND_URL=https://batter.example.com
-```
-
-### Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| `JWT_SECRET is required` on start | You forgot to set `JWT_SECRET` in `.env`. Run `openssl rand -hex 32` and add it. |
-| `no devices found` after adding a device | Make sure USB debugging is enabled and the device authorized. Run `adb devices` on the host to verify. |
-| Container can't see USB devices | The container needs `privileged: true` and `/dev/bus/usb` mounted (both set in `docker-compose.yml`). Reconnect the USB cable and retry. |
-| Database errors on first startup | Wait 10 seconds — postgres needs to initialize. The healthcheck handles this automatically. |
-| App works on localhost but not from other machines | Set `ALLOWED_ORIGINS` and `FRONTEND_URL` in `.env` to `http://YOUR_IP:3000`. |
+**Full step-by-step guide** — phones, users, HTTPS, updates, backups and
+troubleshooting: [docs/DEPLOY.md](docs/DEPLOY.md). Optional settings are listed
+in [.env.example](.env.example).
 
 ---
 
@@ -211,7 +71,7 @@ internal/
   auth/                  # JWT + password hashing
   config/                # Environment config
   device/                # ADB, scrcpy sessions, screenshot cache
-db/migrations/           # PostgreSQL schema migrations (auto-applied)
+db/migrations/           # PostgreSQL schema migrations (embedded, applied at startup)
 web/                     # Next.js frontend
   src/
     app/
@@ -231,13 +91,14 @@ scripts/                 # Utility scripts
 |----------|---------|-------------|
 | `PORT` | `8080` | Backend HTTP port |
 | `DATABASE_URL` | `postgres://batter:batter@localhost:5432/batter` | PostgreSQL connection string |
-| `JWT_SECRET` | *(required)* | Secret for signing JWT tokens |
+| `JWT_SECRET` | *(generated)* | Secret for signing JWT tokens; if unset, generated once and stored in `DATA_DIR/jwt-secret` |
 | `JWT_EXPIRY_SECS` | `3600` | Access token expiry in seconds |
 | `SCRCPY_SERVER_PATH` | `/usr/local/share/scrcpy/scrcpy-server` | Path to scrcpy-server binary |
 | `SCRCPY_VERSION` | `3.3.4` | scrcpy protocol version |
 | `DATA_DIR` | `./data` | Directory for screenshot cache and runtime data |
-| `ALLOWED_ORIGINS` | *(empty)* | Comma-separated CORS origins |
-| `FRONTEND_URL` | `http://localhost:3000` | Frontend URL for CORS |
+| `ALLOWED_ORIGINS` | *(same origin)* | Comma-separated browser origins; empty allows only the host the app is opened on |
+| `TRUSTED_PROXIES` | *(none)* | Proxy IPs/CIDRs whose `X-Forwarded-For` is believed |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
 ## API Reference
 

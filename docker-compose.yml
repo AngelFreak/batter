@@ -1,13 +1,14 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # Only reachable on the compose network (no published port), so the
+    # default password isn't exposed. Override POSTGRES_PASSWORD if you like.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-batter}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-batter}
       POSTGRES_DB: ${POSTGRES_DB:-batter}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-batter}"]
       interval: 5s
@@ -21,19 +22,36 @@ services:
       - "${BATTER_PORT:-3000}:3000"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-batter}:${POSTGRES_PASSWORD:-batter}@postgres:5432/${POSTGRES_DB:-batter}?sslmode=disable
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required - run: openssl rand -hex 32}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       PORT: "8080"
+      # Optional overrides; every one has a working default (see .env.example).
+      JWT_SECRET: ${JWT_SECRET:-}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
     depends_on:
       postgres:
         condition: service_healthy
     privileged: true
+    # Room for the backend to drain requests (10s) and stop device sessions.
+    stop_grace_period: 30s
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - batter_data:/app/data
+      # adb's key: phones authorize it once ("Allow USB debugging?"), so it
+      # must survive container rebuilds or every phone re-prompts per update.
+      - adb_keys:/root/.android
+    healthcheck:
+      # Probes the Go backend's /health on :8080 — the real liveness signal,
+      # since the Next.js frontend can keep serving even if the API is down.
+      # Uses node (present in the image); the image has no wget/curl.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8080/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
   pgdata:
   batter_data:
+  adb_keys:

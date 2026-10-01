@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/XpertaDK/batter/internal/api/handlers"
 	"github.com/XpertaDK/batter/internal/api/middleware"
@@ -18,12 +20,20 @@ type RouterConfig struct {
 	JWTManager     *auth.JWTManager
 	Logger         *slog.Logger
 	AllowedOrigins []string
+	// TrustedProxies whose X-Forwarded-For is believed; nil trusts none.
+	TrustedProxies []string
 }
 
 // NewRouter creates and configures the Gin router with all routes.
-func NewRouter(cfg RouterConfig) *gin.Engine {
+func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+
+	// Gin trusts every peer's X-Forwarded-For by default, which would let any
+	// client pick its own IP and dodge the per-IP login rate limit.
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("trusted proxies: %w", err)
+	}
 
 	// Global middleware
 	r.Use(gin.Recovery())
@@ -40,7 +50,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	// Handlers
 	authHandler := handlers.NewAuthHandler(cfg.DB, cfg.JWTManager, cfg.Logger)
 	deviceHandler := handlers.NewDeviceHandler(cfg.DeviceManager, cfg.DB, cfg.Logger)
-	deviceWSHandler := handlers.NewDeviceWSHandler(cfg.DeviceManager, cfg.Logger)
+	deviceWSHandler := handlers.NewDeviceWSHandler(cfg.DeviceManager, cfg.Logger, cfg.AllowedOrigins)
 	userHandler := handlers.NewUserHandler(cfg.DB, cfg.Logger)
 	groupHandler := handlers.NewGroupHandler(cfg.DB, cfg.DeviceManager, cfg.Logger)
 	userGroupHandler := handlers.NewUserGroupHandler(cfg.DB, cfg.Logger)
@@ -48,11 +58,14 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	// API v1
 	v1 := r.Group("/api/v1")
 	{
-		// Public auth routes
+		// Public auth routes. Rate-limit the unauthenticated ones per client IP
+		// to blunt brute-force / credential-stuffing and token-refresh abuse.
+		loginLimit := middleware.RateLimit(10, time.Minute)   // login attempts
+		refreshLimit := middleware.RateLimit(30, time.Minute) // token refreshes
 		v1.GET("/auth/needs-setup", authHandler.NeedsSetup)
-		v1.POST("/admin/setup", authHandler.Setup)
-		v1.POST("/auth/login", authHandler.Login)
-		v1.POST("/auth/refresh", authHandler.Refresh)
+		v1.POST("/admin/setup", loginLimit, authHandler.Setup)
+		v1.POST("/auth/login", loginLimit, authHandler.Login)
+		v1.POST("/auth/refresh", refreshLimit, authHandler.Refresh)
 		v1.POST("/auth/logout", authHandler.Logout)
 
 		// Protected routes
@@ -79,39 +92,53 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 					preReg.POST("/probe/:serial", deviceHandler.ProbeDevice)
 				}
 
-				// Per-device endpoints require at least "view" permission
+				// Per-device endpoints. "view" covers watching (which needs a
+				// running session); "control" covers acting on the device;
+				// "manage" covers changing Batter's record of it.
+				view := middleware.RequireDevicePermission(cfg.DB, "view")
+				control := middleware.RequireDevicePermission(cfg.DB, "control")
+				manage := middleware.RequireDevicePermission(cfg.DB, "manage")
 				deviceBySerial := devices.Group("/:serial")
-				deviceBySerial.Use(middleware.RequireDevicePermission(cfg.DB, "view"))
 				{
-					deviceBySerial.GET("", deviceHandler.GetDevice)
-					deviceBySerial.GET("/screenshot", deviceHandler.Screenshot)
-					deviceBySerial.POST("/session/start", deviceHandler.StartSession)
-					deviceBySerial.POST("/session/stop", deviceHandler.StopSession)
-					deviceBySerial.POST("/session/upgrade", deviceHandler.UpgradeSession)
-					deviceBySerial.POST("/session/downgrade", deviceHandler.DowngradeSession)
-					deviceBySerial.POST("/wake", deviceHandler.WakeScreen)
-					deviceBySerial.PUT("", deviceHandler.UpdateDevice)
-					deviceBySerial.DELETE("", deviceHandler.DeleteDevice)
+					deviceBySerial.GET("", view, deviceHandler.GetDevice)
+					deviceBySerial.GET("/screenshot", view, deviceHandler.Screenshot)
+					deviceBySerial.POST("/session/start", view, deviceHandler.StartSession)
+					deviceBySerial.POST("/session/upgrade", view, deviceHandler.UpgradeSession)
+					deviceBySerial.POST("/session/downgrade", view, deviceHandler.DowngradeSession)
+					deviceBySerial.POST("/session/stop", control, deviceHandler.StopSession)
+					deviceBySerial.POST("/wake", control, deviceHandler.WakeScreen)
+					deviceBySerial.POST("/push", control, deviceHandler.PushFile)
+					deviceBySerial.POST("/install", control, deviceHandler.InstallAPK)
+					deviceBySerial.PUT("", manage, deviceHandler.UpdateDevice)
+					deviceBySerial.DELETE("", manage, deviceHandler.DeleteDevice)
 				}
 			}
 
-			// Groups
+			// Device groups. Anyone may list them; changing a group's
+			// membership or grants changes who can reach which device, so
+			// that is admin-only. Batch ops filter to devices the caller
+			// holds the needed permission on (see GroupHandler).
 			groups := protected.Group("/groups")
 			{
 				groups.GET("", groupHandler.ListGroups)
-				groups.POST("", groupHandler.CreateGroup)
-				groups.PUT("/:id", groupHandler.UpdateGroup)
-				groups.DELETE("/:id", groupHandler.DeleteGroup)
 				groups.GET("/:id/devices", groupHandler.GetGroupDevices)
-				groups.POST("/:id/devices", groupHandler.AddDevices)
-				groups.DELETE("/:id/devices/:serial", groupHandler.RemoveDevice)
 				groups.POST("/:id/batch/start", groupHandler.BatchStart)
 				groups.POST("/:id/batch/stop", groupHandler.BatchStop)
-				groups.GET("/:id/access", groupHandler.GetGroupAccess)
-				groups.DELETE("/:id/access/:accessId", groupHandler.RevokeGroupAccess)
-				groups.GET("/:id/team-access", groupHandler.GetGroupTeamAccess)
-				groups.POST("/:id/team-access", groupHandler.GrantGroupTeamAccess)
-				groups.DELETE("/:id/team-access/:accessId", groupHandler.RevokeGroupTeamAccess)
+
+				adminGroups := groups.Group("")
+				adminGroups.Use(middleware.RequireRole("admin"))
+				{
+					adminGroups.POST("", groupHandler.CreateGroup)
+					adminGroups.PUT("/:id", groupHandler.UpdateGroup)
+					adminGroups.DELETE("/:id", groupHandler.DeleteGroup)
+					adminGroups.POST("/:id/devices", groupHandler.AddDevices)
+					adminGroups.DELETE("/:id/devices/:serial", groupHandler.RemoveDevice)
+					adminGroups.GET("/:id/access", groupHandler.GetGroupAccess)
+					adminGroups.DELETE("/:id/access/:accessId", groupHandler.RevokeGroupAccess)
+					adminGroups.GET("/:id/team-access", groupHandler.GetGroupTeamAccess)
+					adminGroups.POST("/:id/team-access", groupHandler.GrantGroupTeamAccess)
+					adminGroups.DELETE("/:id/team-access/:accessId", groupHandler.RevokeGroupTeamAccess)
+				}
 			}
 
 			// Users (admin only)
@@ -162,5 +189,5 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		)
 	}
 
-	return r
+	return r, nil
 }

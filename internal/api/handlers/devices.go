@@ -4,6 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/XpertaDK/batter/internal/api/middleware"
@@ -75,6 +78,9 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 		}
 		dbDevices = append(dbDevices, d)
 		dbMap[d.Serial] = &dbDevices[len(dbDevices)-1]
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	// 2. Get live ADB state
@@ -502,6 +508,110 @@ func (h *DeviceHandler) WakeScreen(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "screen woken"})
+}
+
+// PushFile pushes an uploaded file to the device's /sdcard/Download/ directory.
+func (h *DeviceHandler) PushFile(c *gin.Context) {
+	serial := c.Param("serial")
+
+	// Limit request body to 500MB
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 500*1024*1024)
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	// Sanitize filename — strip path components
+	filename := filepath.Base(header.Filename)
+	if filename == "." || filename == "/" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid filename"})
+		return
+	}
+
+	// Save to temp file
+	tmpFile, err := os.CreateTemp("", "batter-push-*")
+	if err != nil {
+		h.logger.Error("failed to create temp file", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process file"})
+		return
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmpFile.ReadFrom(file); err != nil {
+		tmpFile.Close()
+		h.logger.Error("failed to write temp file", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process file"})
+		return
+	}
+	tmpFile.Close()
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	remotePath := "/sdcard/Download/" + filename
+	if err := h.deviceManager.PushFile(ctx, serial, tmpPath, remotePath); err != nil {
+		h.logger.Error("failed to push file", "serial", serial, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to push file to device"})
+		return
+	}
+
+	h.logger.Info("file pushed to device", "serial", serial, "filename", filename)
+	c.JSON(http.StatusOK, gin.H{"message": "file pushed", "remote_path": remotePath})
+}
+
+// InstallAPK installs an uploaded APK file on the device.
+func (h *DeviceHandler) InstallAPK(c *gin.Context) {
+	serial := c.Param("serial")
+
+	// Limit request body to 500MB
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 500*1024*1024)
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "APK file is required"})
+		return
+	}
+	defer file.Close()
+
+	filename := filepath.Base(header.Filename)
+	if !strings.HasSuffix(strings.ToLower(filename), ".apk") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file must be an APK"})
+		return
+	}
+
+	// Save to temp file
+	tmpFile, err := os.CreateTemp("", "batter-install-*.apk")
+	if err != nil {
+		h.logger.Error("failed to create temp file", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process file"})
+		return
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmpFile.ReadFrom(file); err != nil {
+		tmpFile.Close()
+		h.logger.Error("failed to write temp file", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process file"})
+		return
+	}
+	tmpFile.Close()
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
+	defer cancel()
+
+	if err := h.deviceManager.InstallAPK(ctx, serial, tmpPath); err != nil {
+		h.logger.Error("failed to install APK", "serial", serial, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.logger.Info("APK installed on device", "serial", serial, "filename", filename)
+	c.JSON(http.StatusOK, gin.H{"message": "APK installed", "filename": filename})
 }
 
 // Screenshot captures the device screen. Falls back to a cached screenshot if live capture fails.

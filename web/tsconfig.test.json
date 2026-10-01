@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "incremental": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": ".test-out",
+    "plugins": []
+  },
+  "include": ["src/lib/**/*.test.ts", "src/lib/test-browser-env.ts"]
+}

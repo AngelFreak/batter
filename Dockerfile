@@ -50,8 +50,8 @@ COPY <<'EOF' /app/start.sh
 #!/bin/sh
 set -e
 
-# Start Next.js frontend
-cd /app/web && node server.js &
+# Start Next.js frontend on port 3000
+cd /app/web && PORT=3000 HOSTNAME=0.0.0.0 node server.js &
 
 # Start Go backend
 exec /app/batter
