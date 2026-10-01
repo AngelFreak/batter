@@ -4,8 +4,10 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/XpertaDK/batter/internal/api/middleware"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -274,30 +276,22 @@ type BatchStartRequest struct {
 	MaxFPS  int `json:"max_fps"`
 }
 
-// BatchStart starts sessions for all devices in a group.
+// BatchStart starts sessions for the group's devices the caller may view.
 func (h *GroupHandler) BatchStart(c *gin.Context) {
-	groupID := c.Param("id")
-
 	var req BatchStartRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		req = BatchStartRequest{}
 	}
 
-	rows, err := h.db.Query(c.Request.Context(),
-		"SELECT device_serial FROM device_group_members WHERE group_id = $1", groupID,
-	)
+	serials, skipped, err := h.permittedGroupSerials(c, c.Param("id"), "view")
 	if err != nil {
+		h.logger.Error("batch start: failed to list group devices", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list group devices"})
 		return
 	}
-	defer rows.Close()
 
 	var started, failed int
-	for rows.Next() {
-		var serial string
-		if err := rows.Scan(&serial); err != nil {
-			continue
-		}
+	for _, serial := range serials {
 		_, err := h.deviceManager.StartSession(c.Request.Context(), serial, device.SessionOptions{
 			MaxSize: req.MaxSize,
 			MaxFPS:  req.MaxFPS,
@@ -309,13 +303,40 @@ func (h *GroupHandler) BatchStart(c *gin.Context) {
 			started++
 		}
 	}
-	if err := rows.Err(); err != nil {
-		// Sessions may already have started; report the partial result rather
-		// than a 500, but surface that the device list was truncated.
-		h.logger.Warn("batch start: error reading group devices", "error", err)
+
+	c.JSON(http.StatusOK, gin.H{"started": started, "failed": failed, "skipped": skipped})
+}
+
+// permittedGroupSerials returns the group's device serials on which the caller
+// holds at least minPermission, plus how many members were skipped for lacking
+// it. Rows are fully read before returning so callers don't hold a pooled
+// connection open across slow device operations.
+func (h *GroupHandler) permittedGroupSerials(c *gin.Context, groupID, minPermission string) ([]string, int, error) {
+	rows, err := h.db.Query(c.Request.Context(),
+		"SELECT device_serial FROM device_group_members WHERE group_id = $1", groupID,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	members, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, 0, err
 	}
 
-	c.JSON(http.StatusOK, gin.H{"started": started, "failed": failed})
+	var permitted []string
+	skipped := 0
+	for _, serial := range members {
+		ok, err := middleware.HasDevicePermission(c, h.db, serial, minPermission)
+		if err != nil {
+			return nil, 0, err
+		}
+		if ok {
+			permitted = append(permitted, serial)
+		} else {
+			skipped++
+		}
+	}
+	return permitted, skipped, nil
 }
 
 // GetGroupAccess returns all user access grants for a group.
@@ -387,37 +408,25 @@ func (h *GroupHandler) RevokeGroupAccess(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "access revoked"})
 }
 
-// BatchStop stops sessions for all devices in a group.
+// BatchStop stops sessions for the group's devices the caller may control.
 func (h *GroupHandler) BatchStop(c *gin.Context) {
-	groupID := c.Param("id")
-
-	rows, err := h.db.Query(c.Request.Context(),
-		"SELECT device_serial FROM device_group_members WHERE group_id = $1", groupID,
-	)
+	serials, skipped, err := h.permittedGroupSerials(c, c.Param("id"), "control")
 	if err != nil {
+		h.logger.Error("batch stop: failed to list group devices", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list group devices"})
 		return
 	}
-	defer rows.Close()
 
 	var stopped, failed int
-	for rows.Next() {
-		var serial string
-		if err := rows.Scan(&serial); err != nil {
-			continue
-		}
+	for _, serial := range serials {
 		if err := h.deviceManager.StopSession(serial); err != nil {
 			failed++
 		} else {
 			stopped++
 		}
 	}
-	if err := rows.Err(); err != nil {
-		// Sessions may already have stopped; report partial result, not a 500.
-		h.logger.Warn("batch stop: error reading group devices", "error", err)
-	}
 
-	c.JSON(http.StatusOK, gin.H{"stopped": stopped, "failed": failed})
+	c.JSON(http.StatusOK, gin.H{"stopped": stopped, "failed": failed, "skipped": skipped})
 }
 
 // GetGroupTeamAccess returns all team access grants for a device group.

@@ -18,20 +18,13 @@ type RBACConfig struct {
 // Admins bypass this check entirely.
 func RequireDevicePermission(db *pgxpool.Pool, minPermission string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		role, _ := c.Get(ContextKeyRole)
-		if role == "admin" {
-			c.Next()
-			return
-		}
-
-		userID, _ := c.Get(ContextKeyUserID)
 		serial := c.Param("serial")
 		if serial == "" {
 			c.Next()
 			return
 		}
 
-		hasAccess, err := checkDeviceAccess(c, db, userID.(string), serial, minPermission)
+		hasAccess, err := HasDevicePermission(c, db, serial, minPermission)
 		if err != nil || !hasAccess {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "no access to this device"})
 			return
@@ -39,6 +32,16 @@ func RequireDevicePermission(db *pgxpool.Pool, minPermission string) gin.Handler
 
 		c.Next()
 	}
+}
+
+// HasDevicePermission reports whether the authenticated caller holds at least
+// minPermission on the device. Admins always do. For handlers that act on many
+// devices at once (group batch ops), where the route-level check can't apply.
+func HasDevicePermission(c *gin.Context, db *pgxpool.Pool, serial, minPermission string) (bool, error) {
+	if c.GetString(ContextKeyRole) == "admin" {
+		return true, nil
+	}
+	return checkDeviceAccess(c, db, c.GetString(ContextKeyUserID), serial, minPermission)
 }
 
 // checkDeviceAccess verifies if a user has the specified permission for a device.

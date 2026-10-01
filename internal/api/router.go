@@ -83,41 +83,53 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 					preReg.POST("/probe/:serial", deviceHandler.ProbeDevice)
 				}
 
-				// Per-device endpoints require at least "view" permission
+				// Per-device endpoints. "view" covers watching (which needs a
+				// running session); "control" covers acting on the device;
+				// "manage" covers changing Batter's record of it.
+				view := middleware.RequireDevicePermission(cfg.DB, "view")
+				control := middleware.RequireDevicePermission(cfg.DB, "control")
+				manage := middleware.RequireDevicePermission(cfg.DB, "manage")
 				deviceBySerial := devices.Group("/:serial")
-				deviceBySerial.Use(middleware.RequireDevicePermission(cfg.DB, "view"))
 				{
-					deviceBySerial.GET("", deviceHandler.GetDevice)
-					deviceBySerial.GET("/screenshot", deviceHandler.Screenshot)
-					deviceBySerial.POST("/session/start", deviceHandler.StartSession)
-					deviceBySerial.POST("/session/stop", deviceHandler.StopSession)
-					deviceBySerial.POST("/session/upgrade", deviceHandler.UpgradeSession)
-					deviceBySerial.POST("/session/downgrade", deviceHandler.DowngradeSession)
-					deviceBySerial.POST("/wake", deviceHandler.WakeScreen)
-					deviceBySerial.POST("/push", deviceHandler.PushFile)
-					deviceBySerial.POST("/install", deviceHandler.InstallAPK)
-					deviceBySerial.PUT("", deviceHandler.UpdateDevice)
-					deviceBySerial.DELETE("", deviceHandler.DeleteDevice)
+					deviceBySerial.GET("", view, deviceHandler.GetDevice)
+					deviceBySerial.GET("/screenshot", view, deviceHandler.Screenshot)
+					deviceBySerial.POST("/session/start", view, deviceHandler.StartSession)
+					deviceBySerial.POST("/session/upgrade", view, deviceHandler.UpgradeSession)
+					deviceBySerial.POST("/session/downgrade", view, deviceHandler.DowngradeSession)
+					deviceBySerial.POST("/session/stop", control, deviceHandler.StopSession)
+					deviceBySerial.POST("/wake", control, deviceHandler.WakeScreen)
+					deviceBySerial.POST("/push", control, deviceHandler.PushFile)
+					deviceBySerial.POST("/install", control, deviceHandler.InstallAPK)
+					deviceBySerial.PUT("", manage, deviceHandler.UpdateDevice)
+					deviceBySerial.DELETE("", manage, deviceHandler.DeleteDevice)
 				}
 			}
 
-			// Groups
+			// Device groups. Anyone may list them; changing a group's
+			// membership or grants changes who can reach which device, so
+			// that is admin-only. Batch ops filter to devices the caller
+			// holds the needed permission on (see GroupHandler).
 			groups := protected.Group("/groups")
 			{
 				groups.GET("", groupHandler.ListGroups)
-				groups.POST("", groupHandler.CreateGroup)
-				groups.PUT("/:id", groupHandler.UpdateGroup)
-				groups.DELETE("/:id", groupHandler.DeleteGroup)
 				groups.GET("/:id/devices", groupHandler.GetGroupDevices)
-				groups.POST("/:id/devices", groupHandler.AddDevices)
-				groups.DELETE("/:id/devices/:serial", groupHandler.RemoveDevice)
 				groups.POST("/:id/batch/start", groupHandler.BatchStart)
 				groups.POST("/:id/batch/stop", groupHandler.BatchStop)
-				groups.GET("/:id/access", groupHandler.GetGroupAccess)
-				groups.DELETE("/:id/access/:accessId", groupHandler.RevokeGroupAccess)
-				groups.GET("/:id/team-access", groupHandler.GetGroupTeamAccess)
-				groups.POST("/:id/team-access", groupHandler.GrantGroupTeamAccess)
-				groups.DELETE("/:id/team-access/:accessId", groupHandler.RevokeGroupTeamAccess)
+
+				adminGroups := groups.Group("")
+				adminGroups.Use(middleware.RequireRole("admin"))
+				{
+					adminGroups.POST("", groupHandler.CreateGroup)
+					adminGroups.PUT("/:id", groupHandler.UpdateGroup)
+					adminGroups.DELETE("/:id", groupHandler.DeleteGroup)
+					adminGroups.POST("/:id/devices", groupHandler.AddDevices)
+					adminGroups.DELETE("/:id/devices/:serial", groupHandler.RemoveDevice)
+					adminGroups.GET("/:id/access", groupHandler.GetGroupAccess)
+					adminGroups.DELETE("/:id/access/:accessId", groupHandler.RevokeGroupAccess)
+					adminGroups.GET("/:id/team-access", groupHandler.GetGroupTeamAccess)
+					adminGroups.POST("/:id/team-access", groupHandler.GrantGroupTeamAccess)
+					adminGroups.DELETE("/:id/team-access/:accessId", groupHandler.RevokeGroupTeamAccess)
+				}
 			}
 
 			// Users (admin only)
