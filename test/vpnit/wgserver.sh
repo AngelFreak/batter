@@ -1,7 +1,12 @@
 #!/bin/sh
 # A minimal WireGuard "VPN provider": one peer ($SUBNET.2), NAT out of eth0.
+# Optional, for the phone LAN test:
+#   DNS_ANSWER  run a DNS server on $SUBNET.1 (only reachable through the
+#               tunnel) answering probe.test with this address
+#   ONLY_TO     forward tunnel traffic to this host only (the "internet"),
+#               so anything else a phone reaches can't have come this way
 set -eu
-apk add --no-cache -q wireguard-tools-wg iptables
+apk add --no-cache -q wireguard-tools-wg iptables ${DNS_ANSWER:+dnsmasq}
 umask 077
 echo "$SERVER_KEY" > /server.key
 ip link add wg0 type wireguard
@@ -10,5 +15,13 @@ ip address add "$SUBNET.1/24" dev wg0
 ip link set wg0 up
 sysctl -qw net.ipv4.ip_forward=1
 iptables -t nat -A POSTROUTING -s "$SUBNET.0/24" -o eth0 -j MASQUERADE
+if [ -n "${ONLY_TO:-}" ]; then
+	iptables -A FORWARD -i wg0 -d "$(getent hosts "$ONLY_TO" | cut -d' ' -f1)" -j ACCEPT
+	iptables -A FORWARD -i wg0 -j DROP
+fi
+if [ -n "${DNS_ANSWER:-}" ]; then
+	dnsmasq --no-resolv --no-hosts --listen-address="$SUBNET.1" --bind-interfaces \
+		--address=/probe.test/"$DNS_ANSWER"
+fi
 touch /ready
 exec sleep infinity
