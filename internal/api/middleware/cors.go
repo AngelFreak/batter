@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -24,7 +25,7 @@ func CORS(config ...CORSConfig) gin.HandlerFunc {
 
 		allowOrigin := ""
 		if origin != "" {
-			if IsOriginAllowed(origin, allowedOrigins) {
+			if IsOriginAllowed(origin, c.Request, allowedOrigins) {
 				allowOrigin = origin
 			}
 		}
@@ -47,18 +48,18 @@ func CORS(config ...CORSConfig) gin.HandlerFunc {
 	}
 }
 
-// IsOriginAllowed reports whether origin is permitted given allowedOrigins.
-// When allowedOrigins is empty it falls back to localhost-only (dev default).
-// It is exported so non-CORS code paths (e.g. the WebSocket upgrader) can
-// enforce the same origin policy.
-func IsOriginAllowed(origin string, allowedOrigins []string) bool {
+// IsOriginAllowed reports whether a browser origin may use the API and
+// WebSockets. With no allowedOrigins it permits same-origin only: the origin's
+// host must match the host the request was addressed to. That needs no
+// configuration for the normal deployment, where the UI and API share a host.
+// It is exported so the WebSocket upgrader enforces the same policy.
+func IsOriginAllowed(origin string, r *http.Request, allowedOrigins []string) bool {
 	if len(allowedOrigins) == 0 {
 		parsed, err := url.Parse(origin)
-		if err != nil {
+		if err != nil || parsed.Host == "" {
 			return false
 		}
-		host := parsed.Hostname()
-		return host == "localhost" || host == "127.0.0.1" || strings.HasSuffix(host, ".localhost")
+		return normalizeHost(parsed.Host, parsed.Scheme) == normalizeHost(requestHost(r), parsed.Scheme)
 	}
 
 	for _, allowed := range allowedOrigins {
@@ -80,4 +81,31 @@ func IsOriginAllowed(origin string, allowedOrigins []string) bool {
 		}
 	}
 	return false
+}
+
+// requestHost is the host the browser addressed. Behind the Next.js rewrite
+// proxy the Host header is rewritten to the backend, and the original arrives
+// in X-Forwarded-Host (which the proxy always overwrites). Trusting it is safe
+// for an origin check: the threat is a browser on another site, and browsers
+// can't set this header on WebSocket handshakes, nor on cross-origin fetches
+// without a preflight that this same check then rejects.
+func requestHost(r *http.Request) string {
+	if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
+		host, _, _ := strings.Cut(fwd, ",")
+		return strings.TrimSpace(host)
+	}
+	return r.Host
+}
+
+// normalizeHost lowercases host and drops the scheme's default port, since
+// browsers omit it from Origin but a Host header may carry it.
+func normalizeHost(host, scheme string) string {
+	host = strings.ToLower(host)
+	switch {
+	case scheme == "http" && strings.HasSuffix(host, ":80"):
+		return strings.TrimSuffix(host, ":80")
+	case scheme == "https" && strings.HasSuffix(host, ":443"):
+		return strings.TrimSuffix(host, ":443")
+	}
+	return host
 }

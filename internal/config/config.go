@@ -1,11 +1,15 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Config holds all application configuration.
@@ -27,15 +31,15 @@ type Config struct {
 	ScrcpyVersion    string
 
 	// Auth
-	JWTSecret       string
-	JWTExpirySecs   int
-	AllowedOrigins  []string
+	JWTSecret     string
+	JWTExpirySecs int
+	// AllowedOrigins lists browser origins allowed to call the API and open
+	// WebSockets. Empty means same-origin only, which is right whenever the
+	// UI and API are served from one host (the default deployment).
+	AllowedOrigins []string
 
 	// Data
 	DataDir string
-
-	// Frontend
-	FrontendURL string
 }
 
 // Load reads configuration from environment variables.
@@ -49,11 +53,14 @@ func Load() (*Config, error) {
 		JWTSecret:        getEnv("JWT_SECRET", ""),
 		DataDir:          getEnv("DATA_DIR", "./data"),
 		JWTExpirySecs:    getEnvInt("JWT_EXPIRY_SECS", 3600),
-		FrontendURL:      getEnv("FRONTEND_URL", "http://localhost:3000"),
 	}
 
 	if cfg.JWTSecret == "" {
-		return nil, fmt.Errorf("JWT_SECRET environment variable is required")
+		secret, err := loadOrCreateSecret(filepath.Join(cfg.DataDir, "jwt-secret"))
+		if err != nil {
+			return nil, fmt.Errorf("JWT_SECRET not set and no usable generated secret: %w", err)
+		}
+		cfg.JWTSecret = secret
 	}
 
 	if err := cfg.LogLevel.UnmarshalText([]byte(getEnv("LOG_LEVEL", "info"))); err != nil {
@@ -77,6 +84,33 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// loadOrCreateSecret returns the secret stored at path, generating one (32
+// random bytes, hex) on first use. It lives in the data volume so tokens stay
+// valid across restarts and redeploys without anyone managing a secret.
+func loadOrCreateSecret(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err == nil {
+		if s := strings.TrimSpace(string(b)); s != "" {
+			return s, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	secret := hex.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(secret+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return secret, nil
 }
 
 func getEnv(key, fallback string) string {

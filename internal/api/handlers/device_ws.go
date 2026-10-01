@@ -22,7 +22,8 @@ type DeviceWSHandler struct {
 }
 
 // NewDeviceWSHandler creates a new device WebSocket handler. allowedOrigins is
-// the same origin policy used for CORS; the WebSocket upgrader enforces it so a
+// the same origin policy used for CORS (empty = same-origin only); the
+// WebSocket upgrader enforces it so a
 // page on an untrusted origin cannot open a control socket with a stolen-from-
 // the-tab JWT (cross-site WebSocket hijacking).
 func NewDeviceWSHandler(dm *device.Manager, logger *slog.Logger, allowedOrigins []string) *DeviceWSHandler {
@@ -41,7 +42,7 @@ func NewDeviceWSHandler(dm *device.Manager, logger *slog.Logger, allowedOrigins 
 				if origin == "" {
 					return true
 				}
-				return middleware.IsOriginAllowed(origin, allowedOrigins)
+				return middleware.IsOriginAllowed(origin, r, allowedOrigins)
 			},
 		},
 	}

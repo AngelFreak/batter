@@ -1,6 +1,8 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # Only reachable on the compose network (no published port), so the
+    # default password isn't exposed. Override POSTGRES_PASSWORD if you like.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-batter}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-batter}
@@ -20,12 +22,12 @@ services:
       - "${BATTER_PORT:-3000}:3000"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-batter}:${POSTGRES_PASSWORD:-batter}@postgres:5432/${POSTGRES_DB:-batter}?sslmode=disable
-      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required - run: openssl rand -hex 32}"
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      PORT: "8080"
+      # Optional overrides; every one has a working default (see .env.example).
+      JWT_SECRET: ${JWT_SECRET:-}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
-      PORT: "8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,6 +37,9 @@ services:
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - batter_data:/app/data
+      # adb's key: phones authorize it once ("Allow USB debugging?"), so it
+      # must survive container rebuilds or every phone re-prompts per update.
+      - adb_keys:/root/.android
     healthcheck:
       # Probes the Go backend's /health on :8080 — the real liveness signal,
       # since the Next.js frontend can keep serving even if the API is down.
@@ -49,3 +54,4 @@ services:
 volumes:
   pgdata:
   batter_data:
+  adb_keys:

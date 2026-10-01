@@ -1,6 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
+  experimental: {
+    // /api is proxied to the Go backend; Next's default 30s proxy timeout
+    // would cut off large APK installs and file pushes to devices.
+    proxyTimeout: 10 * 60 * 1000,
+  },
   async rewrites() {
     return [
       {
