@@ -387,6 +387,13 @@ func (s *Session) UnsubscribeVideo(id string) {
 	s.subscribersMu.Unlock()
 }
 
+// VideoSubscribers returns how many viewers are subscribed to the video.
+func (s *Session) VideoSubscribers() int {
+	s.subscribersMu.RLock()
+	defer s.subscribersMu.RUnlock()
+	return len(s.videoSubscribers)
+}
+
 // ClaimControl claims control for a client (last-writer-wins).
 func (s *Session) ClaimControl(id string) bool {
 	s.controlOwnerMu.Lock()

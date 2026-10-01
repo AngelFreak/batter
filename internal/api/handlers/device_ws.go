@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/XpertaDK/batter/internal/api/middleware"
 	"github.com/XpertaDK/batter/internal/device"
@@ -14,11 +15,25 @@ import (
 	ws "github.com/gorilla/websocket"
 )
 
+// WebSocket limits. Control messages are small JSON, except a clipboard
+// paste (scrcpy caps clipboard text at ~256 KiB, which JSON can inflate);
+// the video socket only ever receives control frames from the client.
+const (
+	maxControlMessage     = 1 << 20
+	maxVideoClientMessage = 4 << 10
+)
+
 // DeviceWSHandler handles WebSocket connections for device video/control.
 type DeviceWSHandler struct {
 	deviceManager *device.Manager
 	logger        *slog.Logger
 	upgrader      ws.Upgrader
+
+	// Keepalive: the server pings every pingPeriod and drops a client that
+	// hasn't answered (or sent anything) within pongWait, so half-open
+	// connections (a laptop leaving the network) are noticed. writeWait
+	// bounds each write.
+	pingPeriod, pongWait, writeWait time.Duration
 }
 
 // NewDeviceWSHandler creates a new device WebSocket handler. allowedOrigins is
@@ -33,6 +48,9 @@ func NewDeviceWSHandler(dm *device.Manager, logger *slog.Logger, allowedOrigins 
 	return &DeviceWSHandler{
 		deviceManager: dm,
 		logger:        logger.With("handler", "device-ws"),
+		pingPeriod:    25 * time.Second,
+		pongWait:      60 * time.Second,
+		writeWait:     10 * time.Second,
 		upgrader: ws.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 1024 * 1024, // 1MB for video frames
@@ -46,6 +64,35 @@ func NewDeviceWSHandler(dm *device.Manager, logger *slog.Logger, allowedOrigins 
 			},
 		},
 	}
+}
+
+// keepAlive arms conn's read deadline, extends it on every pong, and pings
+// the client until done is closed.
+func (h *DeviceWSHandler) keepAlive(conn *ws.Conn, done <-chan struct{}) {
+	_ = conn.SetReadDeadline(time.Now().Add(h.pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(h.pongWait))
+	})
+	go func() {
+		ticker := time.NewTicker(h.pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(ws.PingMessage, nil, time.Now().Add(h.writeWait)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+}
+
+// write sends one message, giving up after writeWait.
+func (h *DeviceWSHandler) write(conn *ws.Conn, kind int, data []byte) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(h.writeWait))
+	return conn.WriteMessage(kind, data)
 }
 
 // VideoStream handles WebSocket connections for video streaming.
@@ -72,9 +119,14 @@ func (h *DeviceWSHandler) VideoStream(c *gin.Context) {
 	videoCh := session.SubscribeVideo(clientID)
 	defer session.UnsubscribeVideo(clientID)
 
+	conn.SetReadLimit(maxVideoClientMessage)
+	done := make(chan struct{})
+	defer close(done)
+	h.keepAlive(conn, done)
+
 	// Send stored SPS/PPS config packet first so decoder can initialize
 	if config := session.GetConfigPacket(); config != nil {
-		if err := conn.WriteMessage(ws.BinaryMessage, config); err != nil {
+		if err := h.write(conn, ws.BinaryMessage, config); err != nil {
 			h.logger.Error("failed to send config packet", "error", err)
 			return
 		}
@@ -85,20 +137,33 @@ func (h *DeviceWSHandler) VideoStream(c *gin.Context) {
 		h.logger.Warn("failed to request keyframe", "serial", serial, "error", err)
 	}
 
-	// Read loop to detect client disconnect
+	// The read loop notices the client leaving (close, error, or no pong
+	// within pongWait), which must end the stream even on a still screen
+	// where no frame write would ever fail.
+	gone := make(chan struct{})
 	go func() {
+		defer close(gone)
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
 			}
+			_ = conn.SetReadDeadline(time.Now().Add(h.pongWait))
 		}
 	}()
 
-	// Write video frames to WebSocket
-	for msg := range videoCh {
-		if err := conn.WriteMessage(ws.BinaryMessage, msg); err != nil {
+	for {
+		select {
+		case <-gone:
 			h.logger.Debug("video client disconnected", "serial", serial, "client", clientID)
 			return
+		case msg, ok := <-videoCh:
+			if !ok {
+				return
+			}
+			if err := h.write(conn, ws.BinaryMessage, msg); err != nil {
+				h.logger.Debug("video client disconnected", "serial", serial, "client", clientID)
+				return
+			}
 		}
 	}
 }
@@ -147,10 +212,13 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 	}
 	defer session.ReleaseControl(clientID)
 
+	conn.SetReadLimit(maxControlMessage)
+
 	// Write mutex for concurrent WebSocket writes (clipboard relay + control responses)
 	var wsMu sync.Mutex
 	done := make(chan struct{})
 	defer close(done)
+	h.keepAlive(conn, done)
 
 	// Clipboard relay goroutine: reads device clipboard and sends to WebSocket client
 	go func() {
@@ -165,7 +233,7 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 				}
 				msg, _ := json.Marshal(map[string]string{"type": "clipboard", "text": text})
 				wsMu.Lock()
-				err := conn.WriteMessage(ws.TextMessage, msg)
+				err := h.write(conn, ws.TextMessage, msg)
 				wsMu.Unlock()
 				if err != nil {
 					return
@@ -180,9 +248,10 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 	for {
 		_, msgData, err := conn.ReadMessage()
 		if err != nil {
-			h.logger.Debug("control client disconnected", "serial", serial, "client", clientID)
+			h.logger.Debug("control client disconnected", "serial", serial, "client", clientID, "error", err)
 			return
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(h.pongWait))
 
 		var msg ControlMessage
 		if err := json.Unmarshal(msgData, &msg); err != nil {
