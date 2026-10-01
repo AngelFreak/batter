@@ -1,9 +1,9 @@
 // Package vpn runs the WireGuard tunnels phones reach the internet through.
 //
 // Each VPN profile is a standard wg-quick config the admin pastes. Batter
-// brings up a tunnel (wg<slot>) from it and adds policy routing so that
-// only the profile's phones (their packets marked by the phone LAN's
-// firewall) and its exit-IP checker uid use the tunnel. The profile's
+// brings up a tunnel (wg<slot>) from it in the slot's routing table, which
+// only the profile's phones (routed there by the phone LAN, by source
+// address) and its exit-IP checker uid use. The profile's
 // routing table falls back to an unreachable route, so when the tunnel is
 // down its phones get no internet rather than leaking out directly.
 // Everything else (Batter's UI, adb, the host) keeps the normal route.

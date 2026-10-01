@@ -62,7 +62,7 @@ type Controller struct {
 	reprov    map[string]netip.Addr // serial -> address of a phone needing USB re-provisioning
 	connected map[string]string     // transport -> serial, as verified by asking the phone
 	onLAN     map[string]bool       // serials whose adb calls go over the LAN
-	rules     string                // last ruleset applied
+	rules     string                // the phones the firewall was last applied for
 	appliedAt time.Time
 	fwErr     error
 }
@@ -332,7 +332,8 @@ func (c *Controller) applyFirewall(ctx context.Context, force bool) error {
 		c.Logger.Error("lan: phone routing not updated", "error", err)
 		return err
 	}
-	rules := Ruleset(c.Iface, c.Net, phones)
+	// Everything the firewall installs follows from the phones list.
+	rules := fmt.Sprint(phones)
 	c.mu.Lock()
 	same := rules == c.rules && c.fwErr == nil && time.Since(c.appliedAt) < reapplyEvery
 	c.mu.Unlock()
@@ -352,7 +353,7 @@ func (c *Controller) applyFirewall(ctx context.Context, force bool) error {
 }
 
 // phones lists every leased adapter with its phone's routing. Adapters with
-// no identified phone, or a phone without a profile, get no mark: nothing
+// no identified phone, or a phone without a profile, get no route: nothing
 // is forwarded for them.
 func (c *Controller) phones(ctx context.Context) ([]Phone, error) {
 	leases, err := c.Leases.List(ctx)
@@ -367,7 +368,7 @@ func (c *Controller) phones(ctx context.Context) ([]Phone, error) {
 	for _, l := range leases {
 		p := Phone{IP: l.IP, MAC: l.MAC}
 		if a, ok := assignments[l.Serial]; ok && l.Serial != "" {
-			p.Mark, p.DNS = a.Mark, a.DNS
+			p.Table, p.DNS = a.Table, a.DNS
 		}
 		phones = append(phones, p)
 	}

@@ -124,7 +124,7 @@ func main() {
 		logger.Error("failed to apply VPN profiles", "error", err)
 	}
 
-	// The phone LAN's firewall goes in (profiles' mark rules are in by now)
+	// The phone LAN's firewall goes in (profiles' tables are in by now)
 	// before its DHCP server hands out addresses.
 	lanCtx, stopLAN := context.WithCancel(context.Background())
 	defer stopLAN()

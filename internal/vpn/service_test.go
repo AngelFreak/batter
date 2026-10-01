@@ -180,15 +180,14 @@ func TestProfilesGetTheirOwnSlotAndKillSwitchBeforeTunnel(t *testing.T) {
 	}
 
 	for _, want := range []struct {
-		uid, table, iface, priority string
-	}{{"31416", "51820", "wg0", "9000"}, {"31417", "51821", "wg1", "9001"}} {
-		// Phones' packets carry their profile's mark (set by the LAN
-		// firewall); the exit-IP check runs as the slot's uid.
-		phones := sys.index(t, "ip rule add fwmark "+want.table+" lookup "+want.table+" priority "+want.priority)
+		uid, table, iface string
+	}{{"31416", "51820", "wg0"}, {"31417", "51821", "wg1"}} {
+		// The exit-IP check runs as the slot's uid (phones are routed to
+		// the table by the LAN, by source address).
 		checker := sys.index(t, "ip rule add uidrange "+want.uid+"-"+want.uid+" lookup "+want.table)
 		unreachable := sys.index(t, "ip route replace unreachable default table "+want.table)
 		link := sys.index(t, "ip link add "+want.iface+" type wireguard")
-		if phones > link || checker > link || unreachable > link {
+		if checker > link || unreachable > link {
 			t.Fatalf("slot %s: tunnel before kill switch:\n  %s", want.iface, strings.Join(sys.log, "\n  "))
 		}
 		sys.index(t, "ip route replace 0.0.0.0/0 dev "+want.iface+" table "+want.table)
@@ -308,7 +307,6 @@ func TestDeleteTearsDownFreesSlotAndUnassignsPhones(t *testing.T) {
 		t.Fatalf("PHONE1 still assigned: %v %v", assigned, err)
 	}
 	sys.index(t, "ip rule del uidrange 31416-31416 lookup 51820")
-	sys.index(t, "ip rule del fwmark 51820 lookup 51820")
 	sys.index(t, "ip link del wg0")
 
 	q, err := s.Create(ctx, "Denmark", sample, true)
@@ -316,7 +314,7 @@ func TestDeleteTearsDownFreesSlotAndUnassignsPhones(t *testing.T) {
 		t.Fatal(err)
 	}
 	assign(t, pool, "PHONE2", q.ID)
-	if got, err := s.Assignments(ctx); err != nil || got["PHONE2"].Mark != 51820 {
+	if got, err := s.Assignments(ctx); err != nil || got["PHONE2"].Table != 51820 {
 		t.Fatalf("slot 0 not reused: %+v %v", got, err)
 	}
 	if _, err := s.Delete(ctx, p.ID); !errors.Is(err, ErrNotFound) {
@@ -404,9 +402,9 @@ func TestAssignmentsRoutePhonesToTheirProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A disabled profile's phones still carry its mark: its kill switch
-	// then blocks them, rather than their traffic going anywhere else.
-	if len(got) != 2 || got["PHONE1"].Mark != 51820 || got["PHONE2"].Mark != 51821 ||
+	// A disabled profile's phones are still routed to its table: its kill
+	// switch then blocks them, rather than their traffic going elsewhere.
+	if len(got) != 2 || got["PHONE1"].Table != 51820 || got["PHONE2"].Table != 51821 ||
 		got["PHONE1"].DNS.String() != "10.64.0.1" || got["PHONE2"].DNS.String() != "10.65.0.1" {
 		t.Fatalf("assignments = %+v", got)
 	}
@@ -428,11 +426,11 @@ func TestSyncAppliesStoredProfilesOnStart(t *testing.T) {
 	if err := restarted.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if sys.index(t, "ip rule add fwmark 51820") > sys.index(t, "ip link add wg0") {
+	if sys.index(t, "ip route replace unreachable default table 51820") > sys.index(t, "ip link add wg0") {
 		t.Fatal("tunnel up before its kill switch")
 	}
 	// A disabled profile is fenced off too, but has no tunnel.
-	sys.index(t, "ip rule add fwmark 51821")
+	sys.index(t, "ip route replace unreachable default table 51821")
 	if sys.has("ip link add wg1") {
 		t.Fatalf("disabled profile brought up:\n  %s", strings.Join(sys.log, "\n  "))
 	}
@@ -475,7 +473,7 @@ func TestLegacyConfigImportedAsDefaultProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got["TETHERED"].Mark != 51820 {
+	if len(got) != 1 || got["TETHERED"].Table != 51820 {
 		t.Fatalf("assignments after import = %+v, want TETHERED on the Default profile", got)
 	}
 	// Importing again is a no-op (the file is gone).

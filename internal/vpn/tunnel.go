@@ -27,31 +27,24 @@ var ErrKillSwitch = errors.New("vpn kill switch not installed")
 const checkerUID = 31416
 
 // Slot identifies one profile's tunnel and routing. Everything is derived
-// from it, so a profile keeps its mark, uid and interface for life.
+// from it, so a profile keeps its table, uid and interface for life.
 type Slot int
 
 // UID is the slot's exit-IP checker uid; its traffic is routed like the
 // slot's phones' (see ExitIPChecker).
 func (s Slot) UID() uint32 { return checkerUID + uint32(s) }
 
-// Mark is the firewall mark the LAN firewall puts on the slot's phones'
-// packets; it routes them to the slot's table. It equals the table number.
-func (s Slot) Mark() uint32 { return 51820 + uint32(s) }
+// Table is the slot's routing table: the tunnel's AllowedIPs, then an
+// unreachable default as the kill switch. The phone LAN routes each
+// phone's traffic to its profile's table.
+func (s Slot) Table() int { return 51820 + int(s) }
 
 func (s Slot) iface() string { return "wg" + strconv.Itoa(int(s)) }
 
-// table holds the slot's routes: the tunnel's AllowedIPs, then an
-// unreachable default as the kill switch.
-func (s Slot) table() string { return strconv.Itoa(51820 + int(s)) }
+func (s Slot) table() string { return strconv.Itoa(s.Table()) }
 
 // priority puts the checker uid's rule ahead of the main table's (32766).
 func (s Slot) priority() string { return strconv.Itoa(10000 + int(s)) }
-
-// markPriority puts the phones' mark rule ahead of the LAN's catch-all
-// (lan.catchAllPriority, 9900) and the main table.
-func (s Slot) markPriority() string { return strconv.Itoa(9000 + int(s)) }
-
-func (s Slot) mark() string { return strconv.FormatUint(uint64(s.Mark()), 10) }
 
 func (s Slot) uidrange() string {
 	uid := strconv.FormatUint(uint64(s.UID()), 10)
@@ -123,8 +116,8 @@ type tunnels struct {
 	logger *slog.Logger
 }
 
-// installKillSwitch sends the slot's phones (by mark) and checker uid to
-// its own table, whose last resort is unreachable. It's idempotent and
+// installKillSwitch makes the slot's table's last resort unreachable and
+// sends the checker uid to it (the LAN routes phones there). It's idempotent and
 // never removes anything, so re-applying a config doesn't open a window
 // where the slot's traffic goes direct.
 func (t *tunnels) installKillSwitch(ctx context.Context, s Slot) error {
@@ -147,18 +140,7 @@ func (t *tunnels) installKillSwitch(ctx context.Context, s Slot) error {
 }
 
 func (t *tunnels) ensureRule(ctx context.Context, v6 bool, s Slot) error {
-	out, err := t.ip(ctx, v6, "rule", "show", "priority", s.markPriority())
-	if err != nil {
-		return err
-	}
-	if !strings.Contains(string(out), fmt.Sprintf("fwmark %#x ", s.Mark())) {
-		_, err = t.ip(ctx, v6, "rule", "add", "fwmark", s.mark(),
-			"lookup", s.table(), "priority", s.markPriority())
-		if err != nil {
-			return err
-		}
-	}
-	out, err = t.ip(ctx, v6, "rule", "show", "priority", s.priority())
+	out, err := t.ip(ctx, v6, "rule", "show", "priority", s.priority())
 	if err != nil {
 		return err
 	}
@@ -218,7 +200,7 @@ func (t *tunnels) takeDown(ctx context.Context, s Slot) {
 
 // relaxReversePathFilter makes replies arriving on iface acceptable. Strict
 // reverse-path filtering checks the source against the main table (the
-// check doesn't carry the mark or uid), which routes the internet via eth0,
+// check doesn't carry the uid), which routes the internet via eth0,
 // so it would drop every reply. Loose mode only needs some route back.
 func (t *tunnels) relaxReversePathFilter(ctx context.Context, iface string) {
 	if out, err := t.cmd(ctx, "", "sysctl", "-n", "net.ipv4.conf.all.rp_filter"); err == nil && strings.TrimSpace(string(out)) == "1" {
@@ -238,11 +220,6 @@ func (t *tunnels) teardown(ctx context.Context, s Slot) {
 		// Delete every copy, in case one was ever added twice.
 		for range 10 {
 			if _, err := t.ip(ctx, v6, "rule", "del", "uidrange", s.uidrange(), "lookup", s.table()); err != nil {
-				break
-			}
-		}
-		for range 10 {
-			if _, err := t.ip(ctx, v6, "rule", "del", "fwmark", s.mark(), "lookup", s.table()); err != nil {
 				break
 			}
 		}
