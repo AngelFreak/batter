@@ -2,6 +2,9 @@
 
 import { useEffect, useState } from 'react';
 import { updateDevice, deleteDevice, setTether, listVPNProfileNames, DeviceInfo, VPNProfileName } from '@/lib/api';
+import { isOperator } from '@/lib/auth';
+import { networkLabel } from '@/lib/device-network';
+import { EthernetPanel } from './ethernet-panel';
 
 interface DeviceEditModalProps {
   device: DeviceInfo | null;
@@ -35,10 +38,10 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
       const res = await setTether(device.serial, id || null);
       setProfileId(res.vpn_profile_id ?? '');
       if (res.apply_error) {
-        setTetherNote(`Saved; will apply when the device is connected (${res.apply_error})`);
+        setTetherNote(`Saved, but not applied yet: ${res.apply_error}`);
       }
     } catch (err) {
-      setTetherNote(err instanceof Error ? err.message : 'Failed to change internet sharing');
+      setTetherNote(err instanceof Error ? err.message : 'Failed to change the phone\'s internet');
     } finally {
       setTetherBusy(false);
     }
@@ -124,7 +127,7 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
 
           <div>
             <label htmlFor="internet-sharing" className="block text-xs text-gray-400 mb-1.5">
-              Internet sharing
+              Internet
             </label>
             <select
               id="internet-sharing"
@@ -133,7 +136,7 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
               disabled={tetherBusy || profiles === null || (profiles.length === 0 && !profileId)}
               className="w-full px-3 py-2 text-xs bg-gray-800 border border-gray-700 rounded-lg text-gray-200 focus:outline-none focus:border-brand-500 disabled:opacity-50"
             >
-              <option value="">Off</option>
+              <option value="">None</option>
               {profiles?.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -142,10 +145,18 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
             </select>
             <p className="mt-1 text-[10px] text-gray-500">
               {profiles !== null && profiles.length === 0
-                ? 'No VPN profiles yet. Ask an admin to add one to share this server\'s internet with the phone.'
-                : 'The phone uses this server\'s internet over USB, through the chosen VPN. The first time, the phone asks for VPN permission: accept it in the live view.'}
+                ? 'No VPN profiles yet. Ask an admin to add one to give the phone internet.'
+                : 'On the phone network (ethernet adapter), the phone reaches the internet only through the chosen VPN, never directly. None: no internet.'}
             </p>
             {tetherNote && <p className="mt-1 text-[10px] text-yellow-400">{tetherNote}</p>}
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5">Connection</label>
+            <div className="text-xs text-gray-300 bg-gray-800 rounded px-2.5 py-1.5 mb-2">{networkLabel(device)}</div>
+            {isOperator() && (device.connection !== 'lan' || device.needs_reprovision) && (
+              <EthernetPanel serial={device.serial} device={device} />
+            )}
           </div>
 
           {/* Delete section */}

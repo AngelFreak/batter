@@ -46,3 +46,9 @@ export function isAdmin(): boolean {
   const user = getUser();
   return user?.role === 'admin';
 }
+
+// Operators and admins may register phones and move them to the network.
+export function isOperator(): boolean {
+  const role = getUser()?.role;
+  return role === 'admin' || role === 'operator';
+}

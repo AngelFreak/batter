@@ -16,21 +16,23 @@ import {
 } from '@/lib/api';
 import { isAdmin } from '@/lib/auth';
 import { ScreenLockPanel } from './screen-lock-panel';
+import { EthernetPanel } from './ethernet-panel';
 
 interface DeviceWizardProps {
   onClose: () => void;
   onComplete: () => void;
 }
 
-type Step = 'serial' | 'validate' | 'details' | 'prepare' | 'groups' | 'access';
+type Step = 'serial' | 'validate' | 'details' | 'prepare' | 'ethernet' | 'groups' | 'access';
 
-const STEPS: Step[] = ['serial', 'validate', 'details', 'prepare', 'groups', 'access'];
+const STEPS: Step[] = ['serial', 'validate', 'details', 'prepare', 'ethernet', 'groups', 'access'];
 
 const STEP_LABELS: Record<Step, string> = {
   serial: 'Serial',
   validate: 'Validate',
   details: 'Details',
   prepare: 'Prepare',
+  ethernet: 'Ethernet',
   groups: 'Groups',
   access: 'Access',
 };
@@ -478,6 +480,8 @@ export function DeviceWizard({ onClose, onComplete }: DeviceWizardProps) {
 
           {step === 'prepare' && <ScreenLockPanel serial={serial} />}
 
+          {step === 'ethernet' && <EthernetPanel serial={serial} />}
+
           {step === 'groups' && (
             <div className="space-y-3">
               <div className="text-xs text-gray-400">
@@ -569,7 +573,7 @@ export function DeviceWizard({ onClose, onComplete }: DeviceWizardProps) {
             {currentIndex === 0 ? 'Cancel' : 'Back'}
           </button>
           <div className="flex items-center gap-2">
-            {(step === 'prepare' || step === 'groups') && (
+            {(step === 'prepare' || step === 'ethernet' || step === 'groups') && (
               <button
                 onClick={goNext}
                 className="px-3 py-2 text-xs text-gray-400 hover:text-gray-200"
