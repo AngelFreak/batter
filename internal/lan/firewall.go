@@ -170,3 +170,24 @@ func (f *Firewall) cmd(ctx context.Context, stdin, name string, args ...string) 
 	}
 	return out, nil
 }
+
+// GuardSubcommand is the batter argument that runs Guard; the container
+// runs it before starting the web app.
+const GuardSubcommand = "lan-guard"
+
+// Guard installs the LAN firewall with no phones allowed anywhere, on the
+// interface carrying addr. The container's start script runs it before
+// anything listens, so phones can't reach the web app or backend in the
+// seconds before Batter's controller takes over.
+func Guard(ctx context.Context, addr, pool string, run RunFunc, logger *slog.Logger) error {
+	n, err := ParseNetwork(addr, pool)
+	if err != nil {
+		return err
+	}
+	iface, err := FindInterface(n.Addr)
+	if err != nil {
+		return err
+	}
+	fw := &Firewall{Iface: iface, Net: n, Run: run, Logger: logger}
+	return fw.Apply(ctx, nil)
+}

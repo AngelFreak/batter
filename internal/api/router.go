@@ -54,7 +54,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 
 	// Handlers
 	authHandler := handlers.NewAuthHandler(cfg.DB, cfg.JWTManager, cfg.Logger)
-	deviceHandler := handlers.NewDeviceHandler(cfg.DeviceManager, cfg.DB, cfg.Logger)
+	deviceHandler := handlers.NewDeviceHandler(cfg.DeviceManager, cfg.DB, cfg.LAN, cfg.Logger)
 	deviceWSHandler := handlers.NewDeviceWSHandler(cfg.DeviceManager, cfg.Logger, cfg.AllowedOrigins)
 	userHandler := handlers.NewUserHandler(cfg.DB, cfg.Logger)
 	groupHandler := handlers.NewGroupHandler(cfg.DB, cfg.DeviceManager, cfg.Logger)
@@ -99,6 +99,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 					preReg.POST("/probe/:serial", deviceHandler.ProbeDevice)
 					preReg.GET("/lock/:serial", deviceHandler.ScreenLock)
 					preReg.POST("/lock/:serial/remove", deviceHandler.RemoveScreenLock)
+					preReg.POST("/ethernet/:serial", deviceHandler.ProvisionEthernet)
 				}
 
 				// Per-device endpoints. "view" covers watching (which needs a

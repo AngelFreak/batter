@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -151,10 +152,15 @@ func (a *ADB) ListDevices(ctx context.Context) ([]ADBDevice, error) {
 	return a.bySerial(a.listDevices), nil
 }
 
-// ListTransports returns adb's own, uncached device list: TCP transports by
-// ip:port, whether or not a serial is mapped to them.
+// ListTransports returns adb's own device list, fresh: TCP transports by
+// ip:port, whether or not a serial is mapped to them. It also refreshes
+// ListDevices' cache.
 func (a *ADB) ListTransports(ctx context.Context) ([]ADBDevice, error) {
-	return a.listDevicesUncached(ctx)
+	a.listMu.Lock()
+	defer a.listMu.Unlock()
+	a.listDevices, a.listErr = a.listDevicesUncached(ctx)
+	a.listAt = time.Now()
+	return slices.Clone(a.listDevices), a.listErr
 }
 
 // bySerial names listed devices by serial. Unidentified TCP transports are
@@ -420,6 +426,7 @@ func (a *ADB) Connect(ctx context.Context, addr string) error {
 		return fmt.Errorf("invalid adb address: %q", addr)
 	}
 	out, err := a.run(ctx, "connect", addr)
+	a.invalidateList()
 	if err != nil {
 		return err
 	}
@@ -436,7 +443,16 @@ func (a *ADB) Disconnect(ctx context.Context, addr string) error {
 		return fmt.Errorf("invalid adb address: %q", addr)
 	}
 	_, err := a.run(ctx, "disconnect", addr)
+	a.invalidateList()
 	return err
+}
+
+// invalidateList makes the next ListDevices ask adb, after a change to
+// adb's transports.
+func (a *ADB) invalidateList() {
+	a.listMu.Lock()
+	a.listAt = time.Time{}
+	a.listMu.Unlock()
 }
 
 // TCPIP restarts the phone's adbd listening on TCP port, so it can be

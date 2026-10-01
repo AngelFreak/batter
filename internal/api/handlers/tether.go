@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/XpertaDK/batter/internal/vpn"
@@ -18,6 +19,12 @@ type PhoneLAN interface {
 	// Reload re-applies the phones' routing after an assignment or profile
 	// change.
 	Reload(ctx context.Context) error
+	// Provision switches a USB-connected phone's adb to TCP, ready for its
+	// move to an ethernet adapter.
+	Provision(ctx context.Context, serial string) error
+	// NeedsReprovision reports a phone on the LAN (at addr) whose adb over
+	// TCP is off, e.g. after a reboot.
+	NeedsReprovision(serial string) (addr netip.Addr, ok bool)
 }
 
 // errNoPhoneLAN is reported when a phone's internet is set on a server

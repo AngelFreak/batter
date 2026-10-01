@@ -20,11 +20,12 @@ type DeviceHandler struct {
 	deviceManager   *device.Manager
 	screenshotCache *device.ScreenshotCache
 	db              *pgxpool.Pool
+	lan             PhoneLAN // nil without a phone network
 	logger          *slog.Logger
 }
 
-// NewDeviceHandler creates a new device handler.
-func NewDeviceHandler(dm *device.Manager, db *pgxpool.Pool, logger *slog.Logger) *DeviceHandler {
+// NewDeviceHandler creates a new device handler. lan may be nil.
+func NewDeviceHandler(dm *device.Manager, db *pgxpool.Pool, lan PhoneLAN, logger *slog.Logger) *DeviceHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -32,8 +33,29 @@ func NewDeviceHandler(dm *device.Manager, db *pgxpool.Pool, logger *slog.Logger)
 		deviceManager:   dm,
 		screenshotCache: dm.ScreenshotCache(),
 		db:              db,
+		lan:             lan,
 		logger:          logger.With("handler", "devices"),
 	}
+}
+
+// ProvisionEthernet switches a USB-connected phone's adb to TCP, so that
+// once it's moved to its ethernet adapter Batter finds and drives it over
+// the phone LAN. Also the fix for a LAN phone whose adb over TCP was reset
+// by a reboot.
+func (h *DeviceHandler) ProvisionEthernet(c *gin.Context) {
+	serial := c.Param("serial")
+	if h.lan == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": errNoPhoneLAN.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	if err := h.lan.Provision(ctx, serial); err != nil {
+		h.logger.Warn("ethernet provisioning failed", "serial", serial, "error", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "couldn't switch the phone's adb to the network; is it connected over USB?"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"serial": serial, "message": "unplug USB and plug in the ethernet adapter"})
 }
 
 // DeviceHealth returns the status of device prerequisites (ADB, scrcpy, connected devices).
@@ -165,6 +187,11 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 			// Not visible to ADB
 			info.State = ""
 			info.Status = "disconnected"
+			if h.lan != nil {
+				if addr, ok := h.lan.NeedsReprovision(d.Serial); ok {
+					info.Connection, info.LANAddress, info.NeedsReprovision = "lan", addr.String(), true
+				}
+			}
 			if d.Status != "disconnected" {
 				statusUpdates = append(statusUpdates, struct {
 					serial string
