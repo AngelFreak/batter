@@ -251,6 +251,33 @@ export async function probeDevice(serial: string): Promise<{ serial: string; mod
   return res.json();
 }
 
+export interface ScreenLockState {
+  /** Android's credential type: "NONE", "PIN", "PASSWORD", "PATTERN", ... */
+  credential: string;
+  /** Lock screen skipped entirely (no swipe). */
+  disabled: boolean;
+}
+
+async function screenLockResult(res: Response, fallback: string): Promise<ScreenLockState> {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || fallback);
+  return body;
+}
+
+export async function getScreenLock(serial: string): Promise<ScreenLockState> {
+  const res = await fetchWithAuth(`/api/v1/devices/lock/${encodeURIComponent(serial)}`);
+  return screenLockResult(res, 'Failed to read screen lock');
+}
+
+/** Removes the phone's PIN/password/pattern (one attempt) and the swipe screen. */
+export async function removeScreenLock(serial: string, credential: string): Promise<ScreenLockState> {
+  const res = await fetchWithAuth(`/api/v1/devices/lock/${encodeURIComponent(serial)}/remove`, {
+    method: 'POST',
+    body: JSON.stringify({ credential }),
+  });
+  return screenLockResult(res, 'Failed to remove screen lock');
+}
+
 export async function updateDevice(serial: string, data: { nickname?: string; model?: string; product?: string }) {
   const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}`, {
     method: 'PUT',

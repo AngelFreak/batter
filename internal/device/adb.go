@@ -136,6 +136,22 @@ func (a *ADB) RemoveReverse(ctx context.Context, serial string, abstractName str
 	return err
 }
 
+// ShellSecret runs a device shell command whose arguments contain a secret.
+// It returns the combined output even when the command fails, and its error
+// never includes the arguments (unlike Shell's), so the secret can't reach
+// logs or API responses through it.
+func (a *ADB) ShellSecret(ctx context.Context, serial string, args ...string) ([]byte, error) {
+	if err := checkSerial(serial); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, a.adbPath, append([]string{"-s", serial, "shell"}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("adb shell command failed: %w", err)
+	}
+	return out, nil
+}
+
 // Shell executes a shell command on the device.
 func (a *ADB) Shell(ctx context.Context, serial string, args ...string) ([]byte, error) {
 	cmdArgs := append([]string{"shell"}, args...)

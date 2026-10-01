@@ -90,6 +90,8 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 					preReg.GET("/discover", deviceHandler.DiscoverDevices)
 					preReg.POST("/validate/:serial", deviceHandler.ValidateDevice)
 					preReg.POST("/probe/:serial", deviceHandler.ProbeDevice)
+					preReg.GET("/lock/:serial", deviceHandler.ScreenLock)
+					preReg.POST("/lock/:serial/remove", deviceHandler.RemoveScreenLock)
 				}
 
 				// Per-device endpoints. "view" covers watching (which needs a

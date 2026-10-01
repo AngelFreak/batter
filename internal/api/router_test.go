@@ -385,3 +385,25 @@ func TestLoginRateLimitKeysOnTrustedClientIP(t *testing.T) {
 		}
 	})
 }
+
+func TestScreenLockEndpointsNeedOperator(t *testing.T) {
+	env := newTestEnv(t)
+	routes := []struct{ method, path, body string }{
+		{"GET", "/api/v1/devices/lock/" + testSerial, ""},
+		{"POST", "/api/v1/devices/lock/" + testSerial + "/remove", `{"credential":"1234"}`},
+	}
+	for _, rt := range routes {
+		// A per-device "manage" grant isn't enough: preparing phones is an
+		// operator task, like registering them.
+		for _, user := range []string{"viewer", "manager"} {
+			if w := env.do(t, user, rt.method, rt.path, rt.body); w.Code != http.StatusForbidden {
+				t.Fatalf("%s %s as %s: status %d, want 403", rt.method, rt.path, user, w.Code)
+			}
+		}
+		// The test device isn't attached, so the operator gets an error, but
+		// not a permission error.
+		if w := env.do(t, "operator", rt.method, rt.path, rt.body); w.Code == http.StatusForbidden || w.Code == http.StatusNotFound {
+			t.Fatalf("%s %s as operator: status %d", rt.method, rt.path, w.Code)
+		}
+	}
+}
