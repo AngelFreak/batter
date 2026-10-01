@@ -214,6 +214,11 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 			middleware.RequireDevicePermission(cfg.DB, "control"),
 			deviceWSHandler.ControlStream,
 		)
+		// Audio: like video, anyone who may watch may listen
+		wsGroup.GET("/device/:serial/audio",
+			middleware.RequireDevicePermission(cfg.DB, "view"),
+			deviceWSHandler.AudioStream,
+		)
 	}
 
 	return r, nil

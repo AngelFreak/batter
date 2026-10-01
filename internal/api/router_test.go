@@ -287,6 +287,27 @@ func TestDeviceRoutesEnforcePermissionLevels(t *testing.T) {
 	}
 }
 
+func TestDeviceAudioSocketNeedsViewPermission(t *testing.T) {
+	env := newTestEnv(t)
+	for user, wantAllowed := range map[string]bool{"stranger": false, "viewer": true, "admin": true} {
+		t.Run(user, func(t *testing.T) {
+			token, err := env.jwt.GenerateToken(env.users[user], user, env.role(t, user))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest("GET", "/ws/device/"+testSerial+"/audio?token="+token, nil)
+			w := httptest.NewRecorder()
+			env.router.ServeHTTP(w, req)
+			// Allowed callers reach the handler, which 404s without a session
+			// (unlike gin's bare 404 for an unregistered route).
+			allowed := w.Code == http.StatusNotFound && strings.Contains(w.Body.String(), "no active session")
+			if allowed != wantAllowed || (!allowed && w.Code != http.StatusForbidden) {
+				t.Fatalf("status %d body %q, want allowed=%v", w.Code, w.Body.String(), wantAllowed)
+			}
+		})
+	}
+}
+
 func TestGroupMutationsRequireAdmin(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
