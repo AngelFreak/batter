@@ -766,3 +766,65 @@ export function deleteVPNProfile(id: string): Promise<{ devices_turned_off: stri
 export function checkVPNProfileExitIP(id: string): Promise<{ exit_ip?: string; error?: string }> {
   return vpnRequest('POST', `/profiles/${encodeURIComponent(id)}/check`);
 }
+
+// Phone network (admin only): which of the box's network ports the
+// phones' switch is on. Batter moves that port into its own network
+// namespace while it serves the phones.
+export interface PhoneNetworkPort {
+  mac: string;
+  name: string;
+}
+
+export interface PhoneNetworkClient {
+  mac: string;
+  ip: string;
+  hostname?: string;
+  serial?: string; // set once identified as a phone over adb
+  last_seen: string;
+}
+
+export interface PhoneNetworkStatus {
+  state: 'off' | 'active' | 'missing' | 'error' | 'unavailable';
+  port?: PhoneNetworkPort;
+  error?: string;
+  unavailable?: string;
+  warning?: string;
+  address: string;
+  pool: string;
+  clients: PhoneNetworkClient[];
+}
+
+export interface BoxNIC {
+  name: string;
+  mac: string;
+  up: boolean;
+  carrier: boolean;
+  driver?: string;
+  bus?: string;
+  usable: boolean;
+  reason?: string;
+  in_use?: boolean;
+}
+
+async function phoneNetworkRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetchWithAuth(`/api/v1/phone-network${path}`, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Phone network request failed');
+  return data;
+}
+
+export function getPhoneNetwork(): Promise<PhoneNetworkStatus> {
+  return phoneNetworkRequest('GET', '');
+}
+
+export async function listBoxNICs(): Promise<BoxNIC[]> {
+  return (await phoneNetworkRequest<{ interfaces: BoxNIC[] }>('GET', '/interfaces')).interfaces;
+}
+
+// Chooses the port (null = phone network off) and applies it at once.
+export function setPhoneNetworkPort(mac: string | null): Promise<PhoneNetworkStatus> {
+  return phoneNetworkRequest('PUT', '', { mac });
+}

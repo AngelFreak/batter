@@ -32,6 +32,7 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
+      const firstRun = needsSetup;
       if (needsSetup) {
         await setup(username, password, email || undefined);
         setNeedsSetup(false);
@@ -40,7 +41,8 @@ export default function LoginPage() {
 
       const data = await login(username, password);
       setAuth(data.access_token, data.refresh_token, data.user);
-      router.push('/dashboard');
+      // First run: offer the phone network's port (optional) before the dashboard.
+      router.push(firstRun ? '/admin/phone-network?setup=1' : '/dashboard');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
