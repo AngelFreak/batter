@@ -130,6 +130,11 @@ The database is the only thing that needs backing up:
 docker compose exec postgres pg_dump -U batter batter > batter-$(date +%F).sql
 ```
 
+The dump contains the VPN profiles' WireGuard private keys (anyone holding
+it can use those VPN accounts), so store it as you would a password: not
+world-readable, not in a shared folder, and encrypted if it leaves the
+server.
+
 Restore into a fresh install:
 
 ```bash

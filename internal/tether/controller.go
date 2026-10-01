@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,33 +23,41 @@ type ADB interface {
 	Install(ctx context.Context, serial, apkPath string) ([]byte, error)
 	Reverse(ctx context.Context, serial, abstractName string, localPort int) error
 	RemoveReverse(ctx context.Context, serial, abstractName string) error
-	ListReverse(ctx context.Context, serial string) ([]string, error)
+	ListReverse(ctx context.Context, serial string) (map[string]string, error)
 }
+
+// Target is where a tethered device's traffic goes: the port of its VPN
+// profile's relay, and the DNS servers its client should use (nil for
+// gnirehtet's default, 8.8.8.8). Queries go through the relay either way.
+type Target struct {
+	Port int
+	DNS  []string
+}
+
+func (t Target) hostSpec() string { return fmt.Sprintf("tcp:%d", t.Port) }
 
 // Controller turns reverse tethering on and off per device.
 type Controller struct {
 	ADB    ADB
 	APK    string // path to gnirehtet.apk
 	Logger *slog.Logger
-	// DNS returns the DNS servers devices should use (e.g. the VPN's), or
-	// nil for gnirehtet's default (8.8.8.8). Queries go through the relay
-	// either way.
-	DNS func() []string
 
 	// mu serializes changes so a toggle and a reconcile pass don't drive the
 	// same device at once.
 	mu sync.Mutex
 }
 
-// Enable installs the client if needed, connects it to the relay and starts
-// it. The first start on a device shows Android's VPN permission prompt.
-func (c *Controller) Enable(ctx context.Context, serial string) error {
+// Enable installs the client if needed, connects it to t's relay and starts
+// it. A client already tethered (to any relay) is stopped first so it comes
+// back on the new relay with t's DNS. The first start on a device shows
+// Android's VPN permission prompt.
+func (c *Controller) Enable(ctx context.Context, serial string, t Target) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.enable(ctx, serial)
+	return c.enable(ctx, serial, t)
 }
 
-func (c *Controller) enable(ctx context.Context, serial string) error {
+func (c *Controller) enable(ctx context.Context, serial string, t Target) error {
 	out, err := c.ADB.Shell(ctx, serial, "pm", "path", appPackage)
 	if err != nil {
 		return fmt.Errorf("check gnirehtet app: %w", err)
@@ -64,19 +71,26 @@ func (c *Controller) enable(ctx context.Context, serial string) error {
 			return fmt.Errorf("install gnirehtet app: %s", strings.TrimSpace(string(res)))
 		}
 	}
-	if err := c.ADB.Reverse(ctx, serial, abstractName, RelayPort); err != nil {
+	reverses, err := c.ADB.ListReverse(ctx, serial)
+	if err != nil {
+		return fmt.Errorf("list adb reverse: %w", err)
+	}
+	if _, ok := reverses["localabstract:"+abstractName]; ok {
+		if err := c.stopClient(ctx, serial); err != nil {
+			return err
+		}
+	}
+	if err := c.ADB.Reverse(ctx, serial, abstractName, t.Port); err != nil {
 		return fmt.Errorf("adb reverse: %w", err)
 	}
 	args := []string{"am", "start", "-a", appPackage + ".START", "-n", appActivity}
-	if c.DNS != nil {
-		if dns := c.DNS(); len(dns) > 0 {
-			args = append(args, "--esa", "dnsServers", strings.Join(dns, ","))
-		}
+	if len(t.DNS) > 0 {
+		args = append(args, "--esa", "dnsServers", strings.Join(t.DNS, ","))
 	}
 	if _, err := c.ADB.Shell(ctx, serial, args...); err != nil {
 		return fmt.Errorf("start gnirehtet client: %w", err)
 	}
-	c.Logger.Info("reverse tethering enabled", "serial", serial)
+	c.Logger.Info("reverse tethering enabled", "serial", serial, "relay_port", t.Port)
 	return nil
 }
 
@@ -88,8 +102,8 @@ func (c *Controller) Disable(ctx context.Context, serial string) error {
 }
 
 func (c *Controller) disable(ctx context.Context, serial string) error {
-	if _, err := c.ADB.Shell(ctx, serial, "am", "start", "-a", appPackage+".STOP", "-n", appActivity); err != nil {
-		return fmt.Errorf("stop gnirehtet client: %w", err)
+	if err := c.stopClient(ctx, serial); err != nil {
+		return err
 	}
 	if err := c.ADB.RemoveReverse(ctx, serial, abstractName); err != nil {
 		return fmt.Errorf("remove adb reverse: %w", err)
@@ -98,12 +112,20 @@ func (c *Controller) disable(ctx context.Context, serial string) error {
 	return nil
 }
 
-// Reconcile brings connected devices in line with their setting. Devices
-// that should be tethered but lost their tunnel (replugged, adb or Batter
-// restarted) are re-enabled; devices still tunnelled with the setting off (a
-// toggle raced a pass, or a disable failed) are disabled. Devices already in
-// the right state are left alone, so their VPN isn't bounced.
-func (c *Controller) Reconcile(ctx context.Context, enabled, connected []string) {
+func (c *Controller) stopClient(ctx context.Context, serial string) error {
+	if _, err := c.ADB.Shell(ctx, serial, "am", "start", "-a", appPackage+".STOP", "-n", appActivity); err != nil {
+		return fmt.Errorf("stop gnirehtet client: %w", err)
+	}
+	return nil
+}
+
+// Reconcile brings connected devices in line with want (serial -> target).
+// Devices that should be tethered but lost their tunnel (replugged, adb or
+// Batter restarted) or tunnel to another relay (profile changed) are
+// (re)enabled; devices still tunnelled that shouldn't be (a toggle raced a
+// pass, a disable failed, the profile was deleted) are disabled. Devices
+// already in the right state are left alone, so their VPN isn't bounced.
+func (c *Controller) Reconcile(ctx context.Context, want map[string]Target, connected []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, serial := range connected {
@@ -112,17 +134,18 @@ func (c *Controller) Reconcile(ctx context.Context, enabled, connected []string)
 			c.Logger.Warn("tether reconcile: list reverse", "serial", serial, "error", err)
 			continue
 		}
-		want := slices.Contains(enabled, serial)
-		if slices.Contains(reverses, "localabstract:"+abstractName) == want {
+		host, tunnelled := reverses["localabstract:"+abstractName]
+		target, wanted := want[serial]
+		switch {
+		case wanted && host != target.hostSpec():
+			err = c.enable(ctx, serial, target)
+		case !wanted && tunnelled:
+			err = c.disable(ctx, serial)
+		default:
 			continue
 		}
-		if want {
-			err = c.enable(ctx, serial)
-		} else {
-			err = c.disable(ctx, serial)
-		}
 		if err != nil {
-			c.Logger.Warn("tether reconcile", "serial", serial, "enable", want, "error", err)
+			c.Logger.Warn("tether reconcile", "serial", serial, "enable", wanted, "error", err)
 		}
 	}
 }
@@ -131,17 +154,17 @@ func (c *Controller) Reconcile(ctx context.Context, enabled, connected []string)
 const reconcileTimeout = 2 * time.Minute
 
 // Watch reconciles now and then every interval until ctx is done. state
-// reports the serials that should be tethered and those connected; when it
+// reports each tethered serial's target and the connected serials; when it
 // fails the pass is skipped rather than guessing.
-func (c *Controller) Watch(ctx context.Context, interval time.Duration, state func(context.Context) (enabled, connected []string, err error)) {
+func (c *Controller) Watch(ctx context.Context, interval time.Duration, state func(context.Context) (want map[string]Target, connected []string, err error)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		passCtx, cancel := context.WithTimeout(ctx, reconcileTimeout)
-		if enabled, connected, err := state(passCtx); err != nil {
+		if want, connected, err := state(passCtx); err != nil {
 			c.Logger.Warn("tether reconcile: device state unavailable", "error", err)
 		} else {
-			c.Reconcile(passCtx, enabled, connected)
+			c.Reconcile(passCtx, want, connected)
 		}
 		cancel()
 		select {

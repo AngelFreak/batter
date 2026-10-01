@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,10 +141,10 @@ esac
 	}
 }
 
-func TestListReverseParsesDeviceSideSpecs(t *testing.T) {
-	got := parseReverseList("UsbFfs localabstract:gnirehtet tcp:31416\nhost-12 localabstract:scrcpy_00ff tcp:40000\n\n")
-	want := []string{"localabstract:gnirehtet", "localabstract:scrcpy_00ff"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
+func TestListReverseMapsDeviceSideToHostSide(t *testing.T) {
+	got := parseReverseList("UsbFfs localabstract:gnirehtet tcp:31417\nhost-12 localabstract:scrcpy_00ff tcp:40000\n\n")
+	want := map[string]string{"localabstract:gnirehtet": "tcp:31417", "localabstract:scrcpy_00ff": "tcp:40000"}
+	if !maps.Equal(got, want) {
 		t.Fatalf("parseReverseList = %v, want %v", got, want)
 	}
 }

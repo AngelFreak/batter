@@ -20,7 +20,6 @@ import (
 	"github.com/XpertaDK/batter/internal/migrate"
 	"github.com/XpertaDK/batter/internal/tether"
 	"github.com/XpertaDK/batter/internal/vpn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -67,21 +66,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	// WireGuard for tethered devices' traffic only (the relay's uid).
-	vpnMgr := &vpn.Manager{
-		Path:   filepath.Join(cfg.DataDir, "wireguard.json"),
-		UID:    tether.RelayUID,
-		Logger: logger.With("component", "vpn"),
-	}
+	// VPN profiles: tethered phones' traffic goes through one, each
+	// profile with its own relay (uid, port) and WireGuard tunnel.
+	vpnSvc := &vpn.Service{DB: db, Logger: logger.With("component", "vpn")}
 	if exe, err := os.Executable(); err == nil {
-		vpnMgr.CheckExit = vpn.ExitIPChecker(exe, cfg.VPNExitIPURL, tether.RelayUID)
+		vpnSvc.CheckExitAs = func(ctx context.Context, uid uint32) (string, error) {
+			return vpn.ExitIPChecker(exe, cfg.VPNExitIPURL, uid)(ctx)
+		}
 	}
 
-	// Reverse tethering; devices opt in individually. Without the relay
-	// binary the feature is off and toggles report it as unavailable.
+	// Reverse tethering. Without the relay binary it is off: profiles still
+	// manage tunnels, and assigning a phone reports it as unavailable.
 	var tetherCtl *tether.Controller
 	if _, err := os.Stat(cfg.GnirehtetPath); err == nil {
-		tetherCtl = newTetherController(dm.ADB(), cfg.GnirehtetAPK, vpnMgr, logger)
+		tetherCtl = &tether.Controller{ADB: dm.ADB(), APK: cfg.GnirehtetAPK, Logger: logger.With("component", "tether")}
+		vpnSvc.StartRelay = func(ctx context.Context, uid uint32, port int) {
+			relay := &tether.Relay{
+				Path:   cfg.GnirehtetPath,
+				UID:    uid,
+				GID:    uid,
+				Port:   port,
+				Logger: logger.With("component", "tether-relay", "port", port),
+			}
+			go relay.Run(ctx)
+		}
 	} else {
 		logger.Warn("reverse tethering unavailable: gnirehtet not found", "path", cfg.GnirehtetPath)
 	}
@@ -98,7 +106,7 @@ func main() {
 		AllowedOrigins: cfg.AllowedOrigins,
 		TrustedProxies: cfg.TrustedProxies,
 		Tether:         tetherCtl,
-		VPN:            vpnMgr,
+		VPN:            vpnSvc,
 	})
 	if err != nil {
 		logger.Error("failed to set up router", "error", err)
@@ -108,27 +116,21 @@ func main() {
 	// Start session health checker (cleans up dead sessions every 30s)
 	stopHealthCheck := dm.StartHealthChecker(30 * time.Second)
 
-	// The VPN's kill switch must be in place before the relay sends any
-	// traffic; if it can't be, the relay stays off rather than leak.
-	vpnErr := vpnMgr.Start(ctx)
-	if vpnErr != nil {
-		logger.Error("reverse tethering disabled: VPN config could not be applied safely", "error", vpnErr)
+	// Bring up every profile: each relay starts only once its kill switch
+	// is in. The single-tunnel version's config becomes profile "Default".
+	if err := vpnSvc.ImportLegacy(ctx, filepath.Join(cfg.DataDir, "wireguard.json")); err != nil {
+		logger.Error("failed to import the previous version's VPN config", "error", err)
+	}
+	if err := vpnSvc.Sync(ctx); err != nil {
+		logger.Error("failed to apply VPN profiles", "error", err)
 	}
 
-	// Reverse tethering: the relay, and a loop that re-applies each device's
-	// setting after replugs and restarts.
+	// Re-apply each device's profile after replugs and restarts.
 	tetherCtx, stopTether := context.WithCancel(context.Background())
 	defer stopTether()
-	if tetherCtl != nil && vpnErr == nil {
-		relay := &tether.Relay{
-			Path:   cfg.GnirehtetPath,
-			UID:    tether.RelayUID,
-			GID:    tether.RelayUID,
-			Logger: logger.With("component", "tether-relay"),
-		}
-		go relay.Run(tetherCtx)
-		go tetherCtl.Watch(tetherCtx, tetherReconcileInterval, func(ctx context.Context) ([]string, []string, error) {
-			return tetherState(ctx, db, dm)
+	if tetherCtl != nil {
+		go tetherCtl.Watch(tetherCtx, tetherReconcileInterval, func(ctx context.Context) (map[string]tether.Target, []string, error) {
+			return tetherState(ctx, vpnSvc, dm)
 		})
 	}
 
@@ -149,6 +151,7 @@ func main() {
 	// sessions, then the DB pool that in-flight handlers were still using.
 	logger.Info("shutting down...")
 	stopTether()
+	vpnSvc.Stop()
 	stopHealthCheck()
 	dm.Shutdown()
 	db.Close()
@@ -160,26 +163,14 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-// newTetherController returns the reverse tethering controller. Devices
-// use the VPN's DNS servers while it is enabled, so lookups go through the
-// tunnel too.
-func newTetherController(adb tether.ADB, apk string, vpnMgr *vpn.Manager, logger *slog.Logger) *tether.Controller {
-	return &tether.Controller{
-		ADB:    adb,
-		APK:    apk,
-		Logger: logger.With("component", "tether"),
-		DNS:    vpnMgr.DNS,
-	}
-}
-
 // tetherReconcileInterval is how soon a replugged device gets its tethering
 // back.
 const tetherReconcileInterval = 15 * time.Second
 
-// tetherState reports the devices that should be tethered and those adb sees
-// as connected and authorized.
-func tetherState(ctx context.Context, db *pgxpool.Pool, dm *device.Manager) (enabled, connected []string, err error) {
-	if enabled, err = handlers.TetherEnabledSerials(ctx, db); err != nil {
+// tetherState reports where each tethered device's traffic should go and
+// which devices adb sees as connected and authorized.
+func tetherState(ctx context.Context, vpnSvc *vpn.Service, dm *device.Manager) (want map[string]tether.Target, connected []string, err error) {
+	if want, err = vpnSvc.TetherTargets(ctx); err != nil {
 		return nil, nil, fmt.Errorf("tether settings: %w", err)
 	}
 	devices, err := dm.ListDevices(ctx)
@@ -191,7 +182,7 @@ func tetherState(ctx context.Context, db *pgxpool.Pool, dm *device.Manager) (ena
 			connected = append(connected, d.Serial)
 		}
 	}
-	return enabled, connected, nil
+	return want, connected, nil
 }
 
 // shutdownDrainTimeout bounds how long in-flight HTTP requests may finish

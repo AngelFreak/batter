@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { updateDevice, deleteDevice, setTether, DeviceInfo } from '@/lib/api';
+import { useEffect, useState } from 'react';
+import { updateDevice, deleteDevice, setTether, listVPNProfileNames, DeviceInfo, VPNProfileName } from '@/lib/api';
 
 interface DeviceEditModalProps {
   device: DeviceInfo | null;
@@ -15,23 +15,30 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [tether, setTetherState] = useState(device?.reverse_tether ?? false);
+  const [profileId, setProfileId] = useState(device?.vpn_profile_id ?? '');
+  const [profiles, setProfiles] = useState<VPNProfileName[] | null>(null);
   const [tetherBusy, setTetherBusy] = useState(false);
   const [tetherNote, setTetherNote] = useState('');
 
+  useEffect(() => {
+    listVPNProfileNames()
+      .then(setProfiles)
+      .catch(() => setProfiles([]));
+  }, []);
+
   if (!device) return null;
 
-  const handleTether = async (enabled: boolean) => {
+  const handleTether = async (id: string) => {
     setTetherBusy(true);
     setTetherNote('');
     try {
-      const res = await setTether(device.serial, enabled);
-      setTetherState(res.reverse_tether);
+      const res = await setTether(device.serial, id || null);
+      setProfileId(res.vpn_profile_id ?? '');
       if (res.apply_error) {
         setTetherNote(`Saved; will apply when the device is connected (${res.apply_error})`);
       }
     } catch (err) {
-      setTetherNote(err instanceof Error ? err.message : 'Failed to change reverse tethering');
+      setTetherNote(err instanceof Error ? err.message : 'Failed to change internet sharing');
     } finally {
       setTetherBusy(false);
     }
@@ -116,30 +123,27 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
           </div>
 
           <div>
-            <div className="flex items-center justify-between">
-              <label htmlFor="reverse-tether" className="text-xs text-gray-400">
-                Reverse tethering
-              </label>
-              <button
-                id="reverse-tether"
-                role="switch"
-                aria-checked={tether}
-                onClick={() => handleTether(!tether)}
-                disabled={tetherBusy}
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:opacity-50 ${
-                  tether ? 'bg-brand-600' : 'bg-gray-700'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-                    tether ? 'translate-x-4' : 'translate-x-0.5'
-                  }`}
-                />
-              </button>
-            </div>
+            <label htmlFor="internet-sharing" className="block text-xs text-gray-400 mb-1.5">
+              Internet sharing
+            </label>
+            <select
+              id="internet-sharing"
+              value={profileId}
+              onChange={(e) => handleTether(e.target.value)}
+              disabled={tetherBusy || profiles === null || (profiles.length === 0 && !profileId)}
+              className="w-full px-3 py-2 text-xs bg-gray-800 border border-gray-700 rounded-lg text-gray-200 focus:outline-none focus:border-brand-500 disabled:opacity-50"
+            >
+              <option value="">Off</option>
+              {profiles?.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
             <p className="mt-1 text-[10px] text-gray-500">
-              The phone uses this server&apos;s internet over USB. The first time, the phone asks
-              for VPN permission: accept it in the live view.
+              {profiles !== null && profiles.length === 0
+                ? 'No VPN profiles yet. Ask an admin to add one to share this server\'s internet with the phone.'
+                : 'The phone uses this server\'s internet over USB, through the chosen VPN. The first time, the phone asks for VPN permission: accept it in the live view.'}
             </p>
             {tetherNote && <p className="mt-1 text-[10px] text-yellow-400">{tetherNote}</p>}
           </div>

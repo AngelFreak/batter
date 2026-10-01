@@ -6,25 +6,32 @@
 package tether
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"time"
 )
 
-// RelayUID runs the relay (and nothing else). Policy routing matches on it to
-// send tethered devices' traffic, and only that, through the VPN.
+// RelayUID is the first relay uid. Each VPN profile's relay runs as its own
+// uid (and nothing else does), so policy routing can send exactly that
+// relay's traffic, the traffic of the phones on that profile, through the
+// profile's tunnel.
 const RelayUID = 31416
 
-// RelayPort is gnirehtet's default relay port; devices reach it through
-// `adb reverse localabstract:gnirehtet tcp:RelayPort`.
+// RelayPort is gnirehtet's default relay port and the first profile's;
+// devices reach their relay through `adb reverse localabstract:gnirehtet
+// tcp:<port>`.
 const RelayPort = 31416
 
 // Relay supervises the gnirehtet relay server process.
 type Relay struct {
 	// Path to the gnirehtet binary.
 	Path string
+	// Port the relay listens on; 0 = gnirehtet's default (RelayPort).
+	Port int
 	// UID/GID to run the relay as. The relay's outbound connections carry
 	// all tethered devices' traffic; giving it its own uid lets policy
 	// routing send exactly that traffic through a VPN. 0 = don't switch.
@@ -63,13 +70,17 @@ func (r *Relay) Run(ctx context.Context) {
 }
 
 func (r *Relay) runOnce(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, r.Path, "relay")
+	args := []string{"relay"}
+	if r.Port != 0 {
+		args = append(args, "-p", strconv.Itoa(r.Port))
+	}
+	cmd := exec.CommandContext(ctx, r.Path, args...)
 	if r.UID != 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Credential: &syscall.Credential{Uid: r.UID, Gid: r.GID},
 		}
 	}
-	r.Logger.Info("starting gnirehtet relay", "uid", r.UID, "port", RelayPort)
+	r.Logger.Info("starting gnirehtet relay", "uid", r.UID, "port", cmp.Or(r.Port, RelayPort))
 	return cmd.Run()
 }
 

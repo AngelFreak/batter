@@ -1,6 +1,7 @@
-# Throwaway network for the VPN integration test (vpn_test.go): a WireGuard
-# server that NATs to the "internet" (this network), a server that echoes the
-# caller's IP, and Batter. Nothing here touches USB or real devices.
+# Throwaway network for the VPN integration test (vpn_test.go): two WireGuard
+# servers ("VPN providers") that NAT to the "internet" (this network), a
+# server that echoes the caller's IP, and Batter. Nothing here touches USB or
+# real devices.
 services:
   postgres:
     image: postgres:16-alpine
@@ -20,12 +21,28 @@ services:
     volumes:
       - ./echo-ip.cgi:/www/cgi-bin/ip:ro
 
-  wgserver:
+  wgserver-a:
     image: alpine:3.20
     privileged: true
     environment:
-      SERVER_KEY: ${SERVER_KEY:?}
-      CLIENT_PUB: ${CLIENT_PUB:?}
+      SERVER_KEY: ${SERVER_KEY_A:?}
+      CLIENT_PUB: ${CLIENT_PUB_A:?}
+      SUBNET: 10.99.0
+    volumes:
+      - ./wgserver.sh:/wgserver.sh:ro
+    command: ["sh", "/wgserver.sh"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/ready"]
+      interval: 2s
+      retries: 60
+
+  wgserver-b:
+    image: alpine:3.20
+    privileged: true
+    environment:
+      SERVER_KEY: ${SERVER_KEY_B:?}
+      CLIENT_PUB: ${CLIENT_PUB_B:?}
+      SUBNET: 10.98.0
     volumes:
       - ./wgserver.sh:/wgserver.sh:ro
     command: ["sh", "/wgserver.sh"]
@@ -48,5 +65,7 @@ services:
         condition: service_healthy
       echo:
         condition: service_started
-      wgserver:
+      wgserver-a:
+        condition: service_healthy
+      wgserver-b:
         condition: service_healthy

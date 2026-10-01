@@ -152,9 +152,9 @@ func (a *ADB) ShellSecret(ctx context.Context, serial string, args ...string) ([
 	return out, nil
 }
 
-// ListReverse returns the device-side specs (e.g. "localabstract:name") of
-// the device's active reverse tunnels.
-func (a *ADB) ListReverse(ctx context.Context, serial string) ([]string, error) {
+// ListReverse returns the device's active reverse tunnels, mapping the
+// device side (e.g. "localabstract:name") to the host side (e.g. "tcp:1234").
+func (a *ADB) ListReverse(ctx context.Context, serial string) (map[string]string, error) {
 	out, err := a.runWithSerial(ctx, serial, "reverse", "--list")
 	if err != nil {
 		return nil, err
@@ -164,11 +164,11 @@ func (a *ADB) ListReverse(ctx context.Context, serial string) ([]string, error) 
 
 // parseReverseList parses `adb reverse --list`: one "<transport> <device-side>
 // <host-side>" line per tunnel.
-func parseReverseList(out string) []string {
-	var specs []string
+func parseReverseList(out string) map[string]string {
+	specs := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
-		if fields := strings.Fields(line); len(fields) >= 2 {
-			specs = append(specs, fields[len(fields)-2])
+		if fields := strings.Fields(line); len(fields) >= 3 {
+			specs[fields[len(fields)-2]] = fields[len(fields)-1]
 		}
 	}
 	return specs

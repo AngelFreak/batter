@@ -1,13 +1,17 @@
-// Package vpnit is a Docker-based integration test of the tethering VPN: the
-// real Batter image, configured through its API, against a throwaway
-// WireGuard server. It proves the routing claims unit tests can't:
+// Package vpnit is a Docker-based integration test of tethering's VPN
+// profiles: the real Batter image, configured through its API, against two
+// throwaway WireGuard servers. It proves the routing claims unit tests
+// can't:
 //
-//   - the relay uid's traffic exits through the tunnel (exit IP is the VPN
-//     server's), while other traffic (root, other uids) stays direct;
-//   - the kill switch: with the tunnel down or gone, the relay uid has no
-//     route out at all rather than leaking directly;
-//   - the config survives a restart and is re-applied on startup;
-//   - without a VPN (or with it disabled) the relay uid goes direct.
+//   - each profile's relay runs as its own uid on its own port, and that
+//     uid's traffic exits through that profile's server; other traffic
+//     (root, other uids) stays direct;
+//   - the kill switch: a profile whose tunnel is down, that is disabled, or
+//     whose server is gone gets no route out at all rather than leaking
+//     directly, and other profiles are unaffected;
+//   - deleting a profile turns off its phones and stops its relay;
+//   - profiles survive a restart and are re-applied on startup, and the
+//     single-tunnel version's config is imported as profile "Default".
 //
 // It needs Docker with kernel WireGuard and runs only when asked:
 //
@@ -37,12 +41,14 @@ import (
 )
 
 const (
-	project  = "batter-vpn-it"
-	relayUID = "31416" // tether.RelayUID
-	echoURL  = "http://echo/cgi-bin/ip"
+	project = "batter-vpn-it"
+	echoURL = "http://echo/cgi-bin/ip"
+	// Relay uids of the first two profile slots (tether.RelayUID + slot).
+	uidA = "31416"
+	uidB = "31417"
 )
 
-func TestTetheringVPN(t *testing.T) {
+func TestTetheringVPNProfiles(t *testing.T) {
 	if os.Getenv("BATTER_DOCKER_IT") != "1" {
 		t.Skip("set BATTER_DOCKER_IT=1 to run the Docker integration test")
 	}
@@ -57,17 +63,21 @@ func TestTetheringVPN(t *testing.T) {
 		run(t, 60*time.Minute, "docker", "build", "-q", "-t", image, repo)
 	}
 
-	serverKey, serverPub := keypair(t)
-	clientKey, clientPub := keypair(t)
-	env := append(os.Environ(), "SERVER_KEY="+serverKey, "CLIENT_PUB="+clientPub, "BATTER_IMAGE="+image)
+	serverKeyA, serverPubA := keypair(t)
+	clientKeyA, clientPubA := keypair(t)
+	serverKeyB, serverPubB := keypair(t)
+	clientKeyB, clientPubB := keypair(t)
+	env := append(os.Environ(), "BATTER_IMAGE="+image,
+		"SERVER_KEY_A="+serverKeyA, "CLIENT_PUB_A="+clientPubA,
+		"SERVER_KEY_B="+serverKeyB, "CLIENT_PUB_B="+clientPubB)
 	compose := func(timeout time.Duration, args ...string) (string, error) {
 		args = append([]string{"compose", "-p", project, "-f", filepath.Join(dir, "compose.yml")}, args...)
 		return runEnv(timeout, env, "docker", args...)
 	}
 	t.Cleanup(func() {
 		if t.Failed() {
-			logs, _ := compose(time.Minute, "logs", "--no-color", "--tail", "80", "batter", "wgserver")
-			t.Logf("container logs:\n%s", logs)
+			logs, _ := compose(time.Minute, "logs", "--no-color", "--tail", "80", "batter")
+			t.Logf("batter logs:\n%s", logs)
 		}
 		if out, err := compose(2*time.Minute, "down", "-v", "--remove-orphans"); err != nil {
 			t.Logf("compose down: %v\n%s", err, out)
@@ -89,172 +99,228 @@ func TestTetheringVPN(t *testing.T) {
 		out, err := inBatter(user, "/app/batter", "vpn-exit-ip", echoURL)
 		return strings.TrimSpace(out), err
 	}
-	mustExitIP := func(t *testing.T, user string) string {
+	mustExit := func(t *testing.T, user, want, what string) {
 		t.Helper()
 		ip, err := exitIP(user)
 		if err != nil {
-			t.Fatalf("exit IP as uid %q: %v (%s)", user, err, ip)
+			t.Fatalf("uid %s (%s): no internet: %v (%s)", user, what, err, ip)
 		}
-		return ip
+		if ip != want {
+			t.Fatalf("uid %s (%s) exits from %s, want %s", user, what, ip, want)
+		}
 	}
-	mustBeBlocked := func(t *testing.T, user string) {
+	mustBeBlocked := func(t *testing.T, user, why string) {
 		t.Helper()
 		if ip, err := exitIP(user); err == nil {
-			t.Fatalf("uid %s reached the internet (from %s) with the tunnel down: leak", user, ip)
+			t.Fatalf("uid %s reached the internet (from %s) with %s: leak", user, ip, why)
 		}
 	}
-
-	wgIP := containerIP(t, compose, "wgserver")
-	batterIP := containerIP(t, compose, "batter")
-	t.Logf("VPN server %s, Batter %s", wgIP, batterIP)
-
-	api := newAPI(t, compose)
-
-	t.Run("relay runs as its own uid", func(t *testing.T) {
-		out, err := inBatter("", "sh", "-c", `for s in /proc/[0-9]*/status; do grep -q '^Name:.*gnirehtet' $s && grep '^Uid:' $s; done; true`)
-		if err != nil || !strings.Contains(out, relayUID) {
-			t.Fatalf("gnirehtet relay not running as uid %s: %q %v", relayUID, out, err)
+	// relayUIDs returns the uids gnirehtet relays run as.
+	relayUIDs := func(t *testing.T) string {
+		t.Helper()
+		out, err := inBatter("", "sh", "-c",
+			`for s in /proc/[0-9]*/status; do grep -q '^Name:.*gnirehtet' $s && awk '/^Uid:/{print $2}' $s; done | sort | tr '\n' ' '; true`)
+		if err != nil {
+			t.Fatalf("list relays: %v %s", err, out)
 		}
-	})
-
-	t.Run("no VPN: tethered traffic goes direct", func(t *testing.T) {
-		if got := api.exitIP(t); got != batterIP {
-			t.Fatalf("exit IP %q, want Batter's own %s", got, batterIP)
+		return strings.TrimSpace(out)
+	}
+	// waitRelays waits for the relays (started and stopped asynchronously)
+	// to run as exactly want, and to listen on ports.
+	waitRelays := func(t *testing.T, want string, ports ...string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			uids := relayUIDs(t)
+			listening, _ := inBatter("", "cat", "/proc/net/tcp", "/proc/net/tcp6")
+			ok := uids == want
+			for _, p := range ports {
+				ok = ok && strings.Contains(listening, ":"+p+" ")
+			}
+			if ok {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("relays run as %q, want %q listening on %v:\n%s", uids, want, ports, listening)
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
-	})
-
-	conf := fmt.Sprintf(`[Interface]
-PrivateKey = %s
-Address = 10.99.0.2/32
-DNS = 10.99.0.1
-
-[Peer]
-PublicKey = %s
-Endpoint = wgserver:51820
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 5
-`, clientKey, serverPub)
-
-	t.Run("enable: relay uid exits via the tunnel, nothing else does", func(t *testing.T) {
-		info := api.put(t, map[string]any{"config": conf, "enabled": true})
-		if info.ApplyError != "" {
-			t.Fatalf("apply error: %s", info.ApplyError)
-		}
-		if got := api.exitIP(t); got != wgIP {
-			t.Fatalf("API exit IP %q, want the VPN server's %s", got, wgIP)
-		}
-		if got := mustExitIP(t, relayUID); got != wgIP {
-			t.Fatalf("relay uid exits from %q, want %s", got, wgIP)
-		}
-		if got := mustExitIP(t, "root"); got != batterIP {
-			t.Fatalf("root exits from %q, want direct %s", got, batterIP)
-		}
-		if got := mustExitIP(t, "1000"); got != batterIP {
-			t.Fatalf("uid 1000 exits from %q, want direct %s", got, batterIP)
-		}
-	})
-
-	t.Run("status reports the handshake and never the private key", func(t *testing.T) {
-		raw := api.get(t)
-		if strings.Contains(raw, clientKey) {
-			t.Fatal("GET /vpn returned the private key")
-		}
-		var info vpnInfo
-		if err := json.Unmarshal([]byte(raw), &info); err != nil {
-			t.Fatal(err)
-		}
-		if info.Status == nil || !info.Status.Up || len(info.Status.Peers) != 1 ||
-			info.Status.Peers[0].LatestHandshake == "" || info.Status.Peers[0].RxBytes == 0 {
-			t.Fatalf("status: %s", raw)
-		}
-		if mode, _ := inBatter("", "stat", "-c", "%a", "/app/data/wireguard.json"); strings.TrimSpace(mode) != "600" {
-			t.Fatalf("config file mode %q, want 600", mode)
-		}
-	})
-
-	t.Run("kill switch: tunnel down blocks the relay uid only", func(t *testing.T) {
-		if out, err := inBatter("", "ip", "link", "set", "wg0", "down"); err != nil {
-			t.Fatalf("%v: %s", err, out)
-		}
-		mustBeBlocked(t, relayUID)
-		if got := api.exitIPErr(t); got == "" {
-			t.Fatal("API check succeeded with the tunnel down")
-		}
-		if got := mustExitIP(t, "root"); got != batterIP {
-			t.Fatalf("root exits from %q with the tunnel down, want direct %s", got, batterIP)
-		}
-
-		if out, err := inBatter("", "ip", "link", "del", "wg0"); err != nil {
-			t.Fatalf("%v: %s", err, out)
-		}
-		mustBeBlocked(t, relayUID)
-	})
-
-	t.Run("re-applying restores the tunnel", func(t *testing.T) {
-		if info := api.put(t, map[string]any{"enabled": true}); info.ApplyError != "" {
-			t.Fatalf("apply error: %s", info.ApplyError)
-		}
-		if got := mustExitIP(t, relayUID); got != wgIP {
-			t.Fatalf("relay uid exits from %q, want %s", got, wgIP)
-		}
-	})
-
-	t.Run("config is re-applied on restart", func(t *testing.T) {
-		// Wipe the tunnel and routing first so only Batter's startup can
-		// bring them back, whether or not the restart keeps the netns.
+	}
+	wipe := func(t *testing.T, uid, iface, table string) {
+		t.Helper()
 		for _, cmd := range [][]string{
-			{"ip", "link", "del", "wg0"},
-			{"ip", "rule", "del", "uidrange", relayUID + "-" + relayUID},
-			{"ip", "route", "flush", "table", "51820"},
+			{"ip", "link", "del", iface},
+			{"ip", "rule", "del", "uidrange", uid + "-" + uid},
+			{"ip", "route", "flush", "table", table},
 		} {
 			if out, err := inBatter("", cmd...); err != nil {
 				t.Fatalf("%v: %v %s", cmd, err, out)
 			}
 		}
-		if got := mustExitIP(t, relayUID); got != batterIP {
-			t.Fatalf("wipe didn't take: relay uid exits from %q", got)
+	}
+
+	ipA := containerIP(t, compose, "wgserver-a")
+	ipB := containerIP(t, compose, "wgserver-b")
+	batterIP := containerIP(t, compose, "batter")
+	t.Logf("VPN servers A %s, B %s; Batter %s", ipA, ipB, batterIP)
+
+	api := newAPI(t, compose)
+
+	confA := clientConf(clientKeyA, serverPubA, "10.99.0", "wgserver-a")
+	confB := clientConf(clientKeyB, serverPubB, "10.98.0", "wgserver-b")
+	var profileA, profileB string
+
+	t.Run("no profiles: no relays", func(t *testing.T) {
+		if uids := relayUIDs(t); uids != "" {
+			t.Fatalf("relays running as %q with no profiles", uids)
+		}
+	})
+
+	t.Run("two profiles: each relay uid exits via its own server", func(t *testing.T) {
+		a := api.createProfile(t, "A", confA)
+		b := api.createProfile(t, "B", confB)
+		profileA, profileB = a.ID, b.ID
+		if a.ApplyError != "" || b.ApplyError != "" {
+			t.Fatalf("apply errors: %q %q", a.ApplyError, b.ApplyError)
+		}
+		// Each relay listens on its own port (31416 = 0x7AB8, 31417 = 0x7AB9).
+		waitRelays(t, uidA+" "+uidB, "7AB8", "7AB9")
+		mustExit(t, uidA, ipA, "profile A")
+		mustExit(t, uidB, ipB, "profile B")
+		mustExit(t, "root", batterIP, "not tethering")
+		mustExit(t, "1000", batterIP, "not tethering")
+		if got := api.exitIP(t, profileA); got != ipA {
+			t.Fatalf("API check for A: %q, want %s", got, ipA)
+		}
+		if got := api.exitIP(t, profileB); got != ipB {
+			t.Fatalf("API check for B: %q, want %s", got, ipB)
+		}
+	})
+
+	t.Run("status reports handshakes and never private keys", func(t *testing.T) {
+		code, raw := api.do(t, "GET", "/api/v1/vpn/profiles", nil)
+		if code != http.StatusOK {
+			t.Fatalf("list: %d %s", code, raw)
+		}
+		if strings.Contains(raw, clientKeyA) || strings.Contains(raw, clientKeyB) {
+			t.Fatal("profile list returned a private key")
+		}
+		var list struct {
+			Profiles []profileInfo `json:"profiles"`
+		}
+		if err := json.Unmarshal([]byte(raw), &list); err != nil || len(list.Profiles) != 2 {
+			t.Fatalf("list: %v %s", err, raw)
+		}
+		for _, p := range list.Profiles {
+			if p.Status == nil || !p.Status.Up || len(p.Status.Peers) != 1 ||
+				p.Status.Peers[0].LatestHandshake == "" || p.Status.Peers[0].RxBytes == 0 {
+				t.Fatalf("profile %s status: %s", p.Name, raw)
+			}
+		}
+	})
+
+	t.Run("kill switch: A's tunnel down blocks only A", func(t *testing.T) {
+		if out, err := inBatter("", "ip", "link", "set", "wg0", "down"); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		mustBeBlocked(t, uidA, "A's tunnel down")
+		if _, errMsg := api.check(t, profileA); errMsg == "" {
+			t.Fatal("API check for A succeeded with its tunnel down")
+		}
+		mustExit(t, uidB, ipB, "profile B")
+		mustExit(t, "root", batterIP, "not tethering")
+	})
+
+	t.Run("disabled profile is blocked; re-enabling restores it", func(t *testing.T) {
+		api.updateProfile(t, profileA, map[string]any{"enabled": false})
+		waitRelays(t, uidB)
+		mustBeBlocked(t, uidA, "A disabled")
+		if p := api.updateProfile(t, profileA, map[string]any{"enabled": true}); p.ApplyError != "" {
+			t.Fatalf("apply error: %s", p.ApplyError)
+		}
+		mustExit(t, uidA, ipA, "profile A re-enabled")
+	})
+
+	t.Run("kill switch: B's server gone blocks only B", func(t *testing.T) {
+		if out, err := compose(2*time.Minute, "stop", "wgserver-b"); err != nil {
+			t.Fatalf("stop wgserver-b: %v\n%s", err, out)
+		}
+		mustBeBlocked(t, uidB, "B's server stopped")
+		mustExit(t, uidA, ipA, "profile A")
+		mustExit(t, "root", batterIP, "not tethering")
+	})
+
+	t.Run("deleting a profile turns off its phones and stops its relay", func(t *testing.T) {
+		if code, body := api.do(t, "POST", "/api/v1/devices", map[string]string{"serial": "ITPHONE"}); code != http.StatusCreated {
+			t.Fatalf("register device: %d %s", code, body)
+		}
+		// No phone is attached, so applying fails; the assignment is stored.
+		if code, body := api.do(t, "PUT", "/api/v1/devices/ITPHONE/tether", map[string]any{"profile_id": profileB}); code != http.StatusOK {
+			t.Fatalf("assign: %d %s", code, body)
+		}
+		code, body := api.do(t, "DELETE", "/api/v1/vpn/profiles/"+profileB, nil)
+		if code != http.StatusOK || !strings.Contains(body, "ITPHONE") {
+			t.Fatalf("delete B: %d %s (want ITPHONE turned off)", code, body)
+		}
+		_, dev := api.do(t, "GET", "/api/v1/devices/ITPHONE", nil)
+		if strings.Contains(dev, "vpn_profile_id") {
+			t.Fatalf("ITPHONE still has a profile: %s", dev)
+		}
+		waitRelays(t, uidA)
+		if out, _ := inBatter("", "ip", "rule", "show"); strings.Contains(out, "uidrange "+uidB) {
+			t.Fatalf("B's policy rule left behind:\n%s", out)
+		}
+		mustExit(t, uidA, ipA, "profile A")
+	})
+
+	t.Run("restart re-applies profiles and imports the old single-tunnel config", func(t *testing.T) {
+		// Wipe A's tunnel and routing so only Batter's startup can bring them
+		// back, whether or not the restart keeps the netns.
+		wipe(t, uidA, "wg0", "51820")
+		mustExit(t, uidA, batterIP, "wiped")
+		// The old config is B's (no profile uses B's keys any more).
+		if out, err := compose(2*time.Minute, "start", "wgserver-b"); err != nil {
+			t.Fatalf("start wgserver-b: %v\n%s", err, out)
+		}
+		ipB := containerIP(t, compose, "wgserver-b")
+		legacy, _ := json.Marshal(map[string]any{"enabled": true, "config": confB})
+		if out, err := inBatter("", "sh", "-c", "umask 077; cat > /app/data/wireguard.json <<'EOF'\n"+string(legacy)+"\nEOF"); err != nil {
+			t.Fatalf("write legacy config: %v %s", err, out)
 		}
 		if out, err := compose(5*time.Minute, "restart", "batter"); err != nil {
 			t.Fatalf("restart: %v\n%s", err, out)
 		}
 		api.waitHealthy(t)
-		if got := mustExitIP(t, relayUID); got != wgIP {
-			t.Fatalf("after restart the relay uid exits from %q, want %s", got, wgIP)
+		mustExit(t, uidA, ipA, "profile A after restart")
+		// "Default" took the free slot 1, so its relay is uid 31417.
+		mustExit(t, uidB, ipB, "imported Default profile")
+		if out, err := inBatter("", "test", "-e", "/app/data/wireguard.json"); err == nil {
+			t.Fatalf("legacy config not removed after import: %s", out)
 		}
-	})
-
-	t.Run("disabled: tethered traffic goes direct again", func(t *testing.T) {
-		if info := api.put(t, map[string]any{"enabled": false}); info.ApplyError != "" {
-			t.Fatalf("apply error: %s", info.ApplyError)
-		}
-		if got := mustExitIP(t, relayUID); got != batterIP {
-			t.Fatalf("relay uid exits from %q with the VPN off, want direct %s", got, batterIP)
-		}
-		if out, _ := inBatter("", "ip", "rule", "show"); strings.Contains(out, "uidrange") {
-			t.Fatalf("policy rule left behind:\n%s", out)
-		}
-	})
-
-	t.Run("kill switch: dead VPN server blocks the relay uid", func(t *testing.T) {
-		if info := api.put(t, map[string]any{"enabled": true}); info.ApplyError != "" {
-			t.Fatalf("apply error: %s", info.ApplyError)
-		}
-		if got := mustExitIP(t, relayUID); got != wgIP {
-			t.Fatalf("relay uid exits from %q, want %s", got, wgIP)
-		}
-		if out, err := compose(2*time.Minute, "stop", "wgserver"); err != nil {
-			t.Fatalf("stop wgserver: %v\n%s", err, out)
-		}
-		mustBeBlocked(t, relayUID)
-		if got := mustExitIP(t, "root"); got != batterIP {
-			t.Fatalf("root exits from %q, want direct %s", got, batterIP)
+		_, names := api.do(t, "GET", "/api/v1/vpn/profile-names", nil)
+		if !strings.Contains(names, `"name":"Default"`) || !strings.Contains(names, `"name":"A"`) {
+			t.Fatalf("profiles after restart: %s", names)
 		}
 	})
 }
 
-type vpnInfo struct {
-	Configured bool   `json:"configured"`
-	Enabled    bool   `json:"enabled"`
+func clientConf(key, serverPub, subnet, server string) string {
+	return fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = %s.2/32
+DNS = %s.1
+
+[Peer]
+PublicKey = %s
+Endpoint = %s:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 5
+`, key, subnet, subnet, serverPub, server)
+}
+
+type profileInfo struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
 	ApplyError string `json:"apply_error"`
 	Status     *struct {
 		Up    bool `json:"up"`
@@ -291,8 +357,6 @@ func newAPI(t *testing.T, compose func(time.Duration, ...string) (string, error)
 	return a
 }
 
-// waitHealthy waits for the API, looking up its host port afresh: it
-// changes when the container restarts.
 func (a *api) waitHealthy(t *testing.T) {
 	t.Helper()
 	out, err := a.compose(time.Minute, "port", "batter", "8080")
@@ -338,57 +402,46 @@ func (a *api) do(t *testing.T, method, path string, body any) (int, string) {
 	return resp.StatusCode, string(b)
 }
 
-func (a *api) get(t *testing.T) string {
+func (a *api) createProfile(t *testing.T, name, config string) profileInfo {
 	t.Helper()
-	code, body := a.do(t, "GET", "/api/v1/vpn", nil)
-	if code != http.StatusOK {
-		t.Fatalf("GET /vpn: %d %s", code, body)
+	code, body := a.do(t, "POST", "/api/v1/vpn/profiles", map[string]any{"name": name, "config": config})
+	var p profileInfo
+	if code != http.StatusCreated || json.Unmarshal([]byte(body), &p) != nil {
+		t.Fatalf("create profile %s: %d %s", name, code, body)
 	}
-	return body
+	return p
 }
 
-func (a *api) put(t *testing.T, req map[string]any) vpnInfo {
+func (a *api) updateProfile(t *testing.T, id string, changes map[string]any) profileInfo {
 	t.Helper()
-	code, body := a.do(t, "PUT", "/api/v1/vpn", req)
-	if code != http.StatusOK {
-		t.Fatalf("PUT /vpn: %d %s", code, body)
+	code, body := a.do(t, "PUT", "/api/v1/vpn/profiles/"+id, changes)
+	var p profileInfo
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &p) != nil {
+		t.Fatalf("update profile: %d %s", code, body)
 	}
-	var info vpnInfo
-	if err := json.Unmarshal([]byte(body), &info); err != nil {
-		t.Fatal(err)
-	}
-	return info
+	return p
 }
 
-func (a *api) check(t *testing.T) (ip, errMsg string) {
+func (a *api) check(t *testing.T, id string) (ip, errMsg string) {
 	t.Helper()
-	code, body := a.do(t, "POST", "/api/v1/vpn/check", nil)
+	code, body := a.do(t, "POST", "/api/v1/vpn/profiles/"+id+"/check", nil)
 	var res struct {
 		ExitIP string `json:"exit_ip"`
 		Error  string `json:"error"`
 	}
 	if code != http.StatusOK || json.Unmarshal([]byte(body), &res) != nil {
-		t.Fatalf("POST /vpn/check: %d %s", code, body)
+		t.Fatalf("check: %d %s", code, body)
 	}
 	return res.ExitIP, res.Error
 }
 
-func (a *api) exitIP(t *testing.T) string {
+func (a *api) exitIP(t *testing.T, id string) string {
 	t.Helper()
-	ip, errMsg := a.check(t)
+	ip, errMsg := a.check(t, id)
 	if errMsg != "" {
 		t.Fatalf("exit IP check failed: %s", errMsg)
 	}
 	return ip
-}
-
-func (a *api) exitIPErr(t *testing.T) string {
-	t.Helper()
-	ip, errMsg := a.check(t)
-	if errMsg == "" {
-		t.Logf("exit IP check succeeded: %s", ip)
-	}
-	return errMsg
 }
 
 func containerIP(t *testing.T, compose func(time.Duration, ...string) (string, error), service string) string {

@@ -26,8 +26,8 @@ type RouterConfig struct {
 	TrustedProxies []string
 	// Tether drives per-device reverse tethering; nil if unavailable.
 	Tether *tether.Controller
-	// VPN manages the tethered devices' WireGuard tunnel; nil if unavailable.
-	VPN *vpn.Manager
+	// VPN manages the VPN profiles tethered devices' traffic goes through.
+	VPN *vpn.Service
 }
 
 // NewRouter creates and configures the Gin router with all routes.
@@ -60,8 +60,8 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	userHandler := handlers.NewUserHandler(cfg.DB, cfg.Logger)
 	groupHandler := handlers.NewGroupHandler(cfg.DB, cfg.DeviceManager, cfg.Logger)
 	userGroupHandler := handlers.NewUserGroupHandler(cfg.DB, cfg.Logger)
-	tetherHandler := handlers.NewTetherHandler(cfg.DB, cfg.Tether, cfg.Logger)
-	vpnHandler := handlers.NewVPNHandler(cfg.VPN, cfg.Logger)
+	tetherHandler := handlers.NewTetherHandler(cfg.DB, cfg.Tether, cfg.VPN, cfg.Logger)
+	vpnHandler := handlers.NewVPNHandler(cfg.VPN, cfg.Tether, cfg.Logger)
 
 	// API v1
 	v1 := r.Group("/api/v1")
@@ -166,15 +166,20 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 				users.PUT("/:id/password", userHandler.ResetPassword)
 			}
 
-			// WireGuard for tethered devices (admin only): it holds a private
-			// key and decides where every tethered phone's traffic exits.
-			vpnRoutes := protected.Group("/vpn")
+			// VPN profiles. Anyone may list their names (choosing a phone's
+			// profile needs only the device's "manage" permission); the
+			// profiles themselves hold private keys and decide where phones'
+			// traffic exits, so managing them is admin-only.
+			protected.GET("/vpn/profile-names", vpnHandler.ProfileNames)
+			vpnRoutes := protected.Group("/vpn/profiles")
 			vpnRoutes.Use(middleware.RequireRole("admin"))
 			{
-				vpnRoutes.GET("", vpnHandler.GetVPN)
-				vpnRoutes.PUT("", vpnHandler.SetVPN)
-				vpnRoutes.DELETE("", vpnHandler.DeleteVPN)
-				vpnRoutes.POST("/check", vpnHandler.CheckExitIP)
+				vpnRoutes.GET("", vpnHandler.ListProfiles)
+				vpnRoutes.POST("", vpnHandler.CreateProfile)
+				vpnRoutes.GET("/:id", vpnHandler.GetProfile)
+				vpnRoutes.PUT("/:id", vpnHandler.UpdateProfile)
+				vpnRoutes.DELETE("/:id", vpnHandler.DeleteProfile)
+				vpnRoutes.POST("/:id/check", vpnHandler.CheckExitIP)
 			}
 
 			// User groups / teams (admin only)

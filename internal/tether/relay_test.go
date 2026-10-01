@@ -88,3 +88,23 @@ func TestBackoffGrowsAndCaps(t *testing.T) {
 		t.Fatalf("backoff(20) = %v, want 30s cap", relayBackoff(20))
 	}
 }
+
+func TestRelayListensOnItsPort(t *testing.T) {
+	bin, starts := fakeRelay(t, "exit 0")
+	r := &Relay{Path: bin, Port: 31417, Logger: quiet, backoff: func(int) time.Duration { return time.Hour }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for countLines(t, starts) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("relay not started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if b, _ := os.ReadFile(starts); strings.TrimSpace(string(b)) != "relay -p 31417" {
+		t.Fatalf("started with %q, want relay -p 31417", b)
+	}
+}

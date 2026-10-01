@@ -49,9 +49,10 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 
 	// 1. Fetch all registered devices from DB
 	rows, err := h.db.Query(ctx,
-		`SELECT serial, model, product, COALESCE(nickname, ''), COALESCE(android_version, ''),
-		        status, last_seen_at, reverse_tether
-		 FROM devices ORDER BY created_at`,
+		`SELECT d.serial, d.model, d.product, COALESCE(d.nickname, ''), COALESCE(d.android_version, ''),
+		        d.status, d.last_seen_at, COALESCE(d.vpn_profile_id::text, ''), COALESCE(p.name, '')
+		 FROM devices d LEFT JOIN vpn_profiles p ON p.id = d.vpn_profile_id
+		 ORDER BY d.created_at`,
 	)
 	if err != nil {
 		return nil, err
@@ -66,7 +67,8 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 		AndroidVersion string
 		Status         string
 		LastSeenAt     *time.Time
-		ReverseTether  bool
+		VPNProfileID   string
+		VPNProfileName string
 	}
 	var dbDevices []dbDevice
 	dbMap := make(map[string]*dbDevice)
@@ -74,7 +76,7 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 	for rows.Next() {
 		var d dbDevice
 		if err := rows.Scan(&d.Serial, &d.Model, &d.Product, &d.Nickname, &d.AndroidVersion,
-			&d.Status, &d.LastSeenAt, &d.ReverseTether); err != nil {
+			&d.Status, &d.LastSeenAt, &d.VPNProfileID, &d.VPNProfileName); err != nil {
 			continue
 		}
 		dbDevices = append(dbDevices, d)
@@ -114,7 +116,8 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 			AndroidVersion: d.AndroidVersion,
 			LastSeenAt:     d.LastSeenAt,
 			Status:         d.Status,
-			ReverseTether:  d.ReverseTether,
+			VPNProfileID:   d.VPNProfileID,
+			VPNProfileName: d.VPNProfileName,
 		}
 
 		if adb, ok := adbMap[d.Serial]; ok {

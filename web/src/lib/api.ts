@@ -113,7 +113,9 @@ export interface DeviceInfo {
   height?: number;
   session_tier?: 'thumbnail' | 'full';
   last_seen_at?: string;
-  reverse_tether: boolean;
+  // Set when the device is tethered: its traffic goes through this profile.
+  vpn_profile_id?: string;
+  vpn_profile_name?: string;
 }
 
 export async function pushFile(serial: string, file: File) {
@@ -288,19 +290,20 @@ export async function updateDevice(serial: string, data: { nickname?: string; mo
   return res.json();
 }
 
-// Turns reverse tethering on or off. The setting is saved even when it can't
-// be applied right now (e.g. the device is unplugged); apply_error says why.
+// Tethers the device through a VPN profile, or turns tethering off (null).
+// The setting is saved even when it can't be applied right now (e.g. the
+// device is unplugged); apply_error says why.
 export async function setTether(
   serial: string,
-  enabled: boolean,
-): Promise<{ reverse_tether: boolean; apply_error?: string }> {
+  profileId: string | null,
+): Promise<{ vpn_profile_id: string | null; apply_error?: string }> {
   const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}/tether`, {
     method: 'PUT',
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify({ profile_id: profileId }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || 'Failed to change reverse tethering');
+    throw new Error(data.error || 'Failed to change internet sharing');
   }
   return res.json();
 }
@@ -659,12 +662,15 @@ export async function revokeUserGroupAccess(id: string, accessId: string) {
   return res.json();
 }
 
-// VPN (admin): the WireGuard tunnel tethered devices' traffic goes through.
-// The server never returns the config's private or preshared keys.
-export interface VPNInfo {
-  configured: boolean;
+// VPN profiles: tethered phones reach the internet through one. Managing
+// them is admin-only; anyone may list their names to choose a phone's. The
+// server never returns a profile's private or preshared keys.
+export interface VPNProfile {
+  id: string;
+  name: string;
   enabled: boolean;
-  config?: {
+  devices: number;
+  config: {
     public_key: string;
     addresses: string[];
     dns: string[] | null;
@@ -690,7 +696,12 @@ export interface VPNInfo {
   apply_error?: string;
 }
 
-async function vpnRequest(method: string, path: string, body?: unknown): Promise<VPNInfo> {
+export interface VPNProfileName {
+  id: string;
+  name: string;
+}
+
+async function vpnRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetchWithAuth(`/api/v1/vpn${path}`, {
     method,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -700,24 +711,34 @@ async function vpnRequest(method: string, path: string, body?: unknown): Promise
   return data;
 }
 
-export function getVPN(): Promise<VPNInfo> {
-  return vpnRequest('GET', '');
+export async function listVPNProfiles(): Promise<VPNProfile[]> {
+  return (await vpnRequest<{ profiles: VPNProfile[] }>('GET', '/profiles')).profiles;
 }
 
-// Saves a pasted wg-quick config (omit it to only switch the VPN on/off).
-export function setVPN(enabled: boolean, config?: string): Promise<VPNInfo> {
-  return vpnRequest('PUT', '', config ? { enabled, config } : { enabled });
+export async function listVPNProfileNames(): Promise<VPNProfileName[]> {
+  return (await vpnRequest<{ profiles: VPNProfileName[] }>('GET', '/profile-names')).profiles;
 }
 
-export function deleteVPN(): Promise<VPNInfo> {
-  return vpnRequest('DELETE', '');
+export function createVPNProfile(name: string, config: string, enabled = true): Promise<VPNProfile> {
+  return vpnRequest('POST', '/profiles', { name, config, enabled });
 }
 
-// Where tethered devices' traffic currently exits; error if it can't get out
-// (with the VPN on, that's the kill switch holding while the tunnel is down).
-export async function checkVPNExitIP(): Promise<{ exit_ip?: string; error?: string }> {
-  const res = await fetchWithAuth('/api/v1/vpn/check', { method: 'POST' });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Exit IP check failed');
-  return data;
+// Omitted fields are kept, so the config (and its key) needn't be re-sent.
+export function updateVPNProfile(
+  id: string,
+  changes: { name?: string; config?: string; enabled?: boolean },
+): Promise<VPNProfile> {
+  return vpnRequest('PUT', `/profiles/${encodeURIComponent(id)}`, changes);
+}
+
+// Deleting a profile turns tethering off on its phones.
+export function deleteVPNProfile(id: string): Promise<{ devices_turned_off: string[] | null }> {
+  return vpnRequest('DELETE', `/profiles/${encodeURIComponent(id)}`);
+}
+
+// Where the profile's phones' traffic currently exits; error if it can't get
+// out (with the profile enabled, that's the kill switch holding while its
+// tunnel is down).
+export function checkVPNProfileExitIP(id: string): Promise<{ exit_ip?: string; error?: string }> {
+  return vpnRequest('POST', `/profiles/${encodeURIComponent(id)}/check`);
 }

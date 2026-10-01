@@ -186,7 +186,7 @@ func (m *Manager) killDeviceServer(ctx context.Context, serial string) {
 		m.logger.Debug("list reverse tunnels", "serial", serial, "error", err)
 		return
 	}
-	for _, spec := range specs {
+	for spec := range specs {
 		if name, ok := strings.CutPrefix(spec, "localabstract:"); ok && strings.HasPrefix(name, "scrcpy_") {
 			_ = m.adb.RemoveReverse(ctx, serial, name)
 		}
@@ -473,7 +473,9 @@ type DeviceInfo struct {
 	Height         int         `json:"height,omitempty"`
 	SessionTier    SessionTier `json:"session_tier,omitempty"`
 	LastSeenAt     *time.Time  `json:"last_seen_at,omitempty"`
-	ReverseTether  bool        `json:"reverse_tether"`
+	// VPNProfileID is set when the device is tethered, through that profile.
+	VPNProfileID   string `json:"vpn_profile_id,omitempty"`
+	VPNProfileName string `json:"vpn_profile_name,omitempty"`
 }
 
 // ValidateDevice checks whether a device is reachable via ADB and returns its state.
