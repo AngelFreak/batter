@@ -36,24 +36,40 @@ func (h *DeviceWSHandler) AudioStream(c *gin.Context) {
 	defer conn.Close()
 
 	// Read loop to detect client disconnect, which also ends the wait below.
-	ctx, cancel := context.WithTimeout(context.Background(), audioReadyTimeout)
+	// Listeners only send control frames; the read loop notices them
+	// leaving (close, error, or no pong within pongWait).
+	conn.SetReadLimit(maxVideoClientMessage)
+	done := make(chan struct{})
+	defer close(done)
+	h.keepAlive(conn, done)
+	gone := make(chan struct{})
 	go func() {
-		defer cancel()
+		defer close(gone)
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
 			}
+			_ = conn.SetReadDeadline(time.Now().Add(h.pongWait))
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), audioReadyTimeout)
+	go func() {
+		select {
+		case <-gone:
+			cancel() // stop waiting for a listener that left
+		case <-ctx.Done():
 		}
 	}()
 	status := session.WaitAudio(ctx)
 	cancel()
 
 	msg, _ := json.Marshal(status)
-	if err := conn.WriteMessage(ws.TextMessage, msg); err != nil {
+	if err := h.write(conn, ws.TextMessage, msg); err != nil {
 		return
 	}
 	if !status.Available {
-		_ = conn.WriteMessage(ws.CloseMessage, ws.FormatCloseMessage(ws.CloseNormalClosure, "audio unavailable"))
+		_ = conn.WriteControl(ws.CloseMessage, ws.FormatCloseMessage(ws.CloseNormalClosure, "audio unavailable"), time.Now().Add(h.writeWait))
 		return
 	}
 
@@ -63,14 +79,23 @@ func (h *DeviceWSHandler) AudioStream(c *gin.Context) {
 	defer session.UnsubscribeAudio(clientID)
 
 	if config := session.GetAudioConfigPacket(); config != nil {
-		if err := conn.WriteMessage(ws.BinaryMessage, config); err != nil {
+		if err := h.write(conn, ws.BinaryMessage, config); err != nil {
 			return
 		}
 	}
-	for msg := range audioCh {
-		if err := conn.WriteMessage(ws.BinaryMessage, msg); err != nil {
+	for {
+		select {
+		case <-gone:
 			h.logger.Debug("audio client disconnected", "serial", serial, "client", clientID)
 			return
+		case msg, ok := <-audioCh:
+			if !ok {
+				return
+			}
+			if err := h.write(conn, ws.BinaryMessage, msg); err != nil {
+				h.logger.Debug("audio client disconnected", "serial", serial, "client", clientID)
+				return
+			}
 		}
 	}
 }

@@ -54,6 +54,7 @@ func fakePhoneSession(t *testing.T, tune func(h *DeviceWSHandler)) (*device.Sess
 	r := gin.New()
 	r.GET("/ws/device/:serial/video", h.VideoStream)
 	r.GET("/ws/device/:serial/control", h.ControlStream)
+	r.GET("/ws/device/:serial/audio", h.AudioStream)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return session, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/device/FAKE01/"
@@ -223,5 +224,34 @@ func TestSlowVideoClientStaysCurrent(t *testing.T) {
 	t.Logf("slow client: %d frames in 5s, worst lag after warm-up %v", frames, worst)
 	if worst > time.Second {
 		t.Fatalf("slow client is %v behind, want under 1s", worst)
+	}
+}
+
+func TestAudioHandlerDropsClientThatStopsAnsweringPings(t *testing.T) {
+	session, base := fakePhoneSession(t, func(h *DeviceWSHandler) {
+		h.pingPeriod, h.pongWait = 50*time.Millisecond, 300*time.Millisecond
+	})
+	conn := dial(t, base+"audio") // never reads, so never answers a ping
+	defer conn.Close()
+	waitAudio(t, session, 1, 3*time.Second)
+	waitAudio(t, session, 0, 2*time.Second)
+}
+
+func TestAudioHandlerExitsWhenClientLeaves(t *testing.T) {
+	session, base := fakePhoneSession(t, nil)
+	conn := dial(t, base+"audio")
+	waitAudio(t, session, 1, 3*time.Second)
+	conn.Close()
+	waitAudio(t, session, 0, time.Second)
+}
+
+func waitAudio(t *testing.T, s *device.Session, want int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for s.AudioSubscribers() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d audio subscribers after %v, want %d", s.AudioSubscribers(), within, want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

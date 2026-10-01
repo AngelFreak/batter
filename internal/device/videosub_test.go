@@ -104,3 +104,21 @@ func seqs(msgs [][]byte) []uint32 {
 	}
 	return out
 }
+
+// Audio packets are independent, so a lagging listener just skips ahead:
+// its queue stays short and it gets the newest audio, not a growing delay.
+func TestSlowAudioListenerSkipsAhead(t *testing.T) {
+	s := &Session{audioSubscribers: map[string]chan []byte{}}
+	ch := s.SubscribeAudio("slow")
+	s.broadcastAudio(packet(true, false, 0)) // config
+	for seq := uint32(1); seq <= 200; seq++ {
+		s.broadcastAudio(packet(false, false, seq))
+		if n := len(ch); n > audioSubBuffer {
+			t.Fatalf("audio backlog %d > %d", n, audioSubBuffer)
+		}
+	}
+	got := seqs(drain(ch))
+	if got[len(got)-1] != 200 {
+		t.Fatalf("listener ends at %d, want the newest packet 200: %v", got[len(got)-1], got)
+	}
+}

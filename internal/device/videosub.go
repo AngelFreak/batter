@@ -71,28 +71,33 @@ func (s *Session) broadcast(msg []byte) {
 	}
 }
 
-func (v *videoSub) offer(msg []byte) bool {
+func (v *videoSub) offer(msg []byte) bool { return offer(v.ch, msg) }
+
+func (v *videoSub) dropBacklog() { dropBacklog(v.ch) }
+
+// offer queues msg unless ch is full.
+func offer(ch chan []byte, msg []byte) bool {
 	select {
-	case v.ch <- msg:
+	case ch <- msg:
 		return true
 	default:
 		return false
 	}
 }
 
-// dropBacklog empties the queue, keeping the latest config packet queued
-// (the decoder needs it; it is never dropped).
-func (v *videoSub) dropBacklog() {
+// dropBacklog empties ch, keeping the latest config packet queued (the
+// decoder needs it; it is never dropped).
+func dropBacklog(ch chan []byte) {
 	var config []byte
 	for {
 		select {
-		case msg := <-v.ch:
+		case msg := <-ch:
 			if c, _ := packetFlags(msg); c {
 				config = msg
 			}
 		default:
 			if config != nil {
-				v.offer(config)
+				offer(ch, config)
 			}
 			return
 		}

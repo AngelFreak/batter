@@ -60,20 +60,38 @@ func (s *Session) audioReadLoop() {
 			return
 		}
 
-		isConfig := binary.BigEndian.Uint64(header[0:8])>>63 == 1
-		s.audioMu.Lock()
-		if isConfig {
-			s.audioConfig = msg
-		}
-		for _, ch := range s.audioSubscribers {
-			select {
-			case ch <- msg:
-			default:
-				// Drop if the listener is slow; it resyncs on the next packet.
-			}
-		}
-		s.audioMu.Unlock()
+		s.broadcastAudio(msg)
 	}
+}
+
+// audioSubBuffer is how many packets a listener may have queued (~200ms of
+// 20ms Opus packets).
+const audioSubBuffer = 10
+
+// broadcastAudio delivers one packet to every listener without blocking.
+// Opus packets decode independently, so a listener that falls behind drops
+// its backlog and continues from the newest packet (latency-first, like
+// video); the config packet is kept.
+func (s *Session) broadcastAudio(msg []byte) {
+	isConfig := binary.BigEndian.Uint64(msg[0:8])>>63 == 1
+	s.audioMu.Lock()
+	defer s.audioMu.Unlock()
+	if isConfig {
+		s.audioConfig = msg
+	}
+	for _, ch := range s.audioSubscribers {
+		if !offer(ch, msg) {
+			dropBacklog(ch)
+			offer(ch, msg)
+		}
+	}
+}
+
+// AudioSubscribers returns how many listeners are subscribed to the audio.
+func (s *Session) AudioSubscribers() int {
+	s.audioMu.RLock()
+	defer s.audioMu.RUnlock()
+	return len(s.audioSubscribers)
 }
 
 // setAudioStatus records the audio status and releases WaitAudio callers.
@@ -125,7 +143,7 @@ func (s *Session) WaitAudio(ctx context.Context) AudioStatus {
 // SubscribeAudio returns a channel of audio packets (12-byte header + Opus
 // data). It is closed when the audio stream or the session ends.
 func (s *Session) SubscribeAudio(id string) chan []byte {
-	ch := make(chan []byte, 50) // ~1s of 20ms Opus packets
+	ch := make(chan []byte, audioSubBuffer)
 	s.audioMu.Lock()
 	defer s.audioMu.Unlock()
 	if s.audioEnded {
