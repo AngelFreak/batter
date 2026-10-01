@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { DeviceThumbnailPlayer } from '@/lib/device-video-thumbnail';
 import { DeviceInfo, fetchScreenshot } from '@/lib/api';
+import { networkState } from '@/lib/device-network';
 
 interface DeviceCardProps {
   device: DeviceInfo;
@@ -164,7 +165,13 @@ export function DeviceCard({ device, onClick, onEdit, onDelete }: DeviceCardProp
         </div>
         <div className="text-[10px] text-gray-500 mt-0.5 truncate">
           {device.serial}
+          {networkState(device) === 'ethernet' && ' · Ethernet'}
         </div>
+        {device.needs_reprovision && (
+          <div className="text-[10px] text-yellow-400 mt-0.5 truncate" title="The phone restarted, which turns adb over the network off. Plug it into USB and switch it back in Edit device.">
+            Needs USB re-provision
+          </div>
+        )}
       </div>
     </div>
   );

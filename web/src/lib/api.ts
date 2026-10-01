@@ -115,9 +115,14 @@ export interface DeviceInfo {
   // Bitrate level of the full-quality session, shared by all its viewers.
   session_quality?: 'low' | 'medium' | 'high';
   last_seen_at?: string;
-  // Set when the device is tethered: its traffic goes through this profile.
+  // Set when the phone has internet: only through this VPN profile.
   vpn_profile_id?: string;
   vpn_profile_name?: string;
+  // How adb reaches it: USB, or the phone network (ethernet adapter).
+  connection?: 'usb' | 'lan';
+  lan_address?: string;
+  // On the phone network but its adb over TCP is off (rebooted).
+  needs_reprovision?: boolean;
 }
 
 export async function pushFile(serial: string, file: File) {
@@ -299,9 +304,19 @@ export async function updateDevice(serial: string, data: { nickname?: string; mo
   return res.json();
 }
 
-// Tethers the device through a VPN profile, or turns tethering off (null).
-// The setting is saved even when it can't be applied right now (e.g. the
-// device is unplugged); apply_error says why.
+// Switches a USB-connected phone's adb to the network, ready to move it to
+// its ethernet adapter (operator or admin).
+export async function provisionEthernet(serial: string): Promise<void> {
+  const res = await fetchWithAuth(`/api/v1/devices/ethernet/${encodeURIComponent(serial)}`, { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to switch the phone to the network');
+  }
+}
+
+// Gives the phone internet through a VPN profile, or none (null). The
+// setting is saved even when it can't be applied right now; apply_error
+// says why.
 export async function setTether(
   serial: string,
   profileId: string | null,
@@ -312,7 +327,7 @@ export async function setTether(
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || 'Failed to change internet sharing');
+    throw new Error(data.error || 'Failed to change the phone\'s internet');
   }
   return res.json();
 }
@@ -671,7 +686,7 @@ export async function revokeUserGroupAccess(id: string, accessId: string) {
   return res.json();
 }
 
-// VPN profiles: tethered phones reach the internet through one. Managing
+// VPN profiles: phones reach the internet through one. Managing
 // them is admin-only; anyone may list their names to choose a phone's. The
 // server never returns a profile's private or preshared keys.
 export interface VPNProfile {
@@ -740,7 +755,7 @@ export function updateVPNProfile(
   return vpnRequest('PUT', `/profiles/${encodeURIComponent(id)}`, changes);
 }
 
-// Deleting a profile turns tethering off on its phones.
+// Deleting a profile leaves its phones without internet.
 export function deleteVPNProfile(id: string): Promise<{ devices_turned_off: string[] | null }> {
   return vpnRequest('DELETE', `/profiles/${encodeURIComponent(id)}`);
 }
