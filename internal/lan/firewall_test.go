@@ -111,33 +111,34 @@ func TestRulesetConfinesThePhoneLAN(t *testing.T) {
 	}
 }
 
-func TestApplyFencesTheLANBeforeForwarding(t *testing.T) {
-	sys := &fakeSystem{out: map[string]string{"ip -4 route show default": "default via 172.20.0.1 dev eth0\n"}}
+// The fence (routing catch-all, nft table, phones' routes) goes in without
+// the port: it matches the port by name, so it holds the moment the NIC
+// arrives. It never touches forwarding.
+func TestFenceInstallsTheRulesWithoutTheLink(t *testing.T) {
+	sys := &fakeSystem{}
 	fw := newFirewall(t, sys)
-	if err := fw.Apply(context.Background(), []Phone{phoneA}); err != nil {
+	if err := fw.Fence(context.Background(), []Phone{phoneA}); err != nil {
 		t.Fatal(err)
 	}
 	catchAll := sys.index(t, "ip rule add iif eth1 unreachable priority 9900")
 	nft := sys.index(t, "nft -f /dev/stdin")
 	route := sys.index(t, "ip rule add from 10.77.0.100 iif eth1 lookup 51820 priority 9000")
-	forward := sys.index(t, "sysctl -w net.ipv4.ip_forward=1")
-	if catchAll > route || nft > route || route > forward {
-		t.Fatalf("phone routed or forwarding on before the LAN is fenced:\n  %s", strings.Join(sys.log, "\n  "))
+	if catchAll > route || nft > route {
+		t.Fatalf("phone routed before the LAN is fenced:\n  %s", strings.Join(sys.log, "\n  "))
 	}
 	if got := sys.stdin["nft -f /dev/stdin"]; got != Ruleset("eth1", fw.Net, []Phone{phoneA}) {
 		t.Fatalf("nft fed:\n%s", got)
 	}
-	if sys.has("ip link set eth1 down") {
-		t.Fatal("LAN taken down after a good apply")
+	if sys.has("sysctl") || sys.has("ip link") || sys.has("ip address") {
+		t.Fatalf("fence touched the link or forwarding:\n  %s", strings.Join(sys.log, "\n  "))
 	}
 }
 
-func TestApplyKeepsAnExistingCatchAll(t *testing.T) {
+func TestFenceKeepsAnExistingCatchAll(t *testing.T) {
 	sys := &fakeSystem{out: map[string]string{
-		"ip -4 route show default":   "default via 172.20.0.1 dev eth0\n",
 		"ip rule show priority 9900": "9900:	from all iif eth1 unreachable\n",
 	}}
-	if err := newFirewall(t, sys).Apply(context.Background(), nil); err != nil {
+	if err := newFirewall(t, sys).Fence(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if sys.has("ip rule add") {
@@ -148,14 +149,13 @@ func TestApplyKeepsAnExistingCatchAll(t *testing.T) {
 // Each phone's traffic is routed to its profile's table by source address.
 // Stale rules (a phone switched profile, or lost it) go before new ones are
 // added, so a switch never has two routes; in between, the catch-all holds.
-func TestApplyRoutesPhonesBySourceAndDropsStaleRoutes(t *testing.T) {
+func TestFenceRoutesPhonesBySourceAndDropsStaleRoutes(t *testing.T) {
 	sys := &fakeSystem{out: map[string]string{
-		"ip -4 route show default": "default via 172.20.0.1 dev eth0\n",
 		"ip rule show priority 9000": "9000:\tfrom 10.77.0.101 iif eth1 lookup 51821 \n" + // phoneB: right
 			"9000:\tfrom 10.77.0.100 iif eth1 lookup 51821 \n" + // phoneA: old profile
 			"9000:\tfrom 10.77.0.102 iif eth1 lookup 51820 \n", // phoneC: profile taken away
 	}}
-	if err := newFirewall(t, sys).Apply(context.Background(), []Phone{phoneA, phoneB, phoneC}); err != nil {
+	if err := newFirewall(t, sys).Fence(context.Background(), []Phone{phoneA, phoneB, phoneC}); err != nil {
 		t.Fatal(err)
 	}
 	delOld := sys.index(t, "ip rule del from 10.77.0.100 iif eth1 lookup 51821 priority 9000")
@@ -168,55 +168,69 @@ func TestApplyRoutesPhonesBySourceAndDropsStaleRoutes(t *testing.T) {
 	}
 }
 
-// If the rules can't go in, the phones get nothing: the LAN goes down.
-func TestApplyFailureTakesTheLANDown(t *testing.T) {
+func TestFenceReportsFailures(t *testing.T) {
 	for _, fail := range []string{"nft", "ip rule add iif", "ip rule add from"} {
-		sys := &fakeSystem{fail: fail, out: map[string]string{"ip -4 route show default": "default via 172.20.0.1 dev eth0\n"}}
-		if err := newFirewall(t, sys).Apply(context.Background(), []Phone{phoneA}); err == nil {
+		sys := &fakeSystem{fail: fail}
+		if err := newFirewall(t, sys).Fence(context.Background(), []Phone{phoneA}); err == nil {
 			t.Fatalf("%s failing: no error", fail)
 		}
-		sys.index(t, "ip link set eth1 down")
-		if sys.has("sysctl -w net.ipv4.ip_forward=1") {
-			t.Fatalf("%s failing: forwarding turned on", fail)
-		}
 	}
 }
 
-// With two networks Docker may pick the phone LAN for the default route
-// (Docker < 28 ignores gw_priority); Batter's own traffic would then try
-// to leave through the phones' switch. Refuse it.
-func TestApplyRefusesTheDefaultRouteOnTheLAN(t *testing.T) {
-	sys := &fakeSystem{out: map[string]string{"ip -4 route show default": "default via 10.77.0.254 dev eth1\n"}}
-	err := newFirewall(t, sys).Apply(context.Background(), nil)
-	if err == nil || !strings.Contains(err.Error(), "default route") {
-		t.Fatalf("err = %v", err)
-	}
-	sys.index(t, "ip link set eth1 down")
-}
-
-// A LAN taken down after a failure comes back once the rules are in.
-func TestApplyBringsTheLANBackUpOnceFenced(t *testing.T) {
-	sys := &fakeSystem{out: map[string]string{"ip -4 route show default": "default via 172.20.0.1 dev eth0\n"}}
-	if err := newFirewall(t, sys).Apply(context.Background(), nil); err != nil {
+// Bringing the port up: no IPv6 on it (Batter has no link-local address
+// for phones to reach), Batter's address, link up, and only then
+// forwarding.
+func TestUpConfiguresThePortBeforeForwarding(t *testing.T) {
+	sys := &fakeSystem{}
+	if err := newFirewall(t, sys).Up(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if sys.index(t, "ip link set eth1 up") < sys.index(t, "nft -f /dev/stdin") {
-		t.Fatal("LAN brought up before its firewall")
+	noV6 := sys.index(t, "sysctl -w net.ipv6.conf.eth1.disable_ipv6=1")
+	addr := sys.index(t, "ip address replace 10.77.0.1/24 dev eth1")
+	up := sys.index(t, "ip link set dev eth1 up")
+	fwd := sys.index(t, "sysctl -w net.ipv4.ip_forward=1")
+	if noV6 > up || addr > up || up > fwd {
+		t.Fatalf("order:\n  %s", strings.Join(sys.log, "\n  "))
 	}
 }
 
-// The guard (run before the web app starts) fences the LAN with no phones
-// allowed anywhere, on the interface carrying Batter's LAN address.
-func TestGuardFencesTheLANBeforeAnythingListens(t *testing.T) {
-	sys := &fakeSystem{out: map[string]string{"ip -4 route show default": "default via 172.20.0.1 dev eth0\n"}}
-	if err := Guard(context.Background(), "127.0.0.1/8", "", sys.run, quiet); err != nil {
+// Turning the phone network off leaves nothing behind in Batter's
+// namespace: no table, no rules, no forwarding.
+func TestRemoveLeavesNothingBehind(t *testing.T) {
+	sys := &fakeSystem{out: map[string]string{
+		"ip rule show priority 9000": "9000:\tfrom 10.77.0.100 iif eth1 lookup 51820 \n",
+		"ip rule show priority 9900": "9900:\tfrom all iif eth1 unreachable\n",
+	}}
+	if err := newFirewall(t, sys).Remove(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	n, _ := ParseNetwork("127.0.0.1/8", "")
-	if got := sys.stdin["nft -f /dev/stdin"]; got != Ruleset("lo", n, nil) {
+	sys.index(t, "sysctl -w net.ipv4.ip_forward=0")
+	sys.index(t, "ip rule del from 10.77.0.100 iif eth1 lookup 51820 priority 9000")
+	sys.index(t, "ip rule del iif eth1 unreachable priority 9900")
+	if got := sys.stdin["nft -f /dev/stdin"]; got != "table inet batter_lan {}\ndelete table inet batter_lan\n" {
+		t.Fatalf("nft fed %q", got)
+	}
+	if sys.index(t, "sysctl -w net.ipv4.ip_forward=0") > sys.index(t, "nft -f /dev/stdin") {
+		t.Fatal("firewall removed while still forwarding")
+	}
+}
+
+// The guard (run before the web app starts) fences the port if it is
+// already in Batter's namespace (it isn't, after a normal container start).
+func TestGuardFencesAPortAlreadyPresent(t *testing.T) {
+	sys := &fakeSystem{}
+	if err := Guard(context.Background(), sys.run, quiet); err != nil {
+		t.Fatal(err)
+	}
+	n, _ := ParseNetwork(DefaultAddr, DefaultPool)
+	if got := sys.stdin["nft -f /dev/stdin"]; got != Ruleset(Iface, n, nil) {
 		t.Fatalf("guard installed:\n%s", got)
 	}
-	if err := Guard(context.Background(), "10.77.0.1", "", sys.run, quiet); err == nil {
-		t.Fatal("invalid address accepted")
+	absent := &fakeSystem{fail: "ip link show"}
+	if err := Guard(context.Background(), absent.run, quiet); err != nil {
+		t.Fatal(err)
+	}
+	if absent.has("nft") {
+		t.Fatal("guard fenced a port that isn't there")
 	}
 }

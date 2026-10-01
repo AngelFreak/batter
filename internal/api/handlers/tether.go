@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/XpertaDK/batter/internal/lan"
 	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,8 +18,12 @@ import (
 // PhoneLAN is the phone network's controller (see internal/lan).
 type PhoneLAN interface {
 	// Reload re-applies the phones' routing after an assignment or profile
-	// change.
+	// change; lan.ErrOff when the phone network is off.
 	Reload(ctx context.Context) error
+	// Status, Interfaces and SetPort back the admin's port picker.
+	Status(ctx context.Context) (lan.Status, error)
+	Interfaces(ctx context.Context) ([]lan.HostNIC, error)
+	SetPort(ctx context.Context, mac string) (lan.Status, error)
 	// Provision switches a USB-connected phone's adb to TCP, ready for its
 	// move to an ethernet adapter.
 	Provision(ctx context.Context, serial string) error
@@ -27,9 +32,8 @@ type PhoneLAN interface {
 	NeedsReprovision(serial string) (addr netip.Addr, ok bool)
 }
 
-// errNoPhoneLAN is reported when a phone's internet is set on a server
-// without a phone network.
-var errNoPhoneLAN = errors.New("this server has no phone network (see docs/DEPLOY.md, \"Phone network\"); the setting applies once it does")
+// errNoPhoneLAN is reported when the phone network can't be used at all.
+var errNoPhoneLAN = lan.ErrOff
 
 // lanApplyTimeout bounds re-applying the phone LAN's routing.
 const lanApplyTimeout = 30 * time.Second

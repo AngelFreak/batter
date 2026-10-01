@@ -13,6 +13,13 @@ import (
 	"strings"
 )
 
+// The phone network's addressing: Batter's address (the phones' gateway and
+// DNS server) and the DHCP pool.
+const (
+	DefaultAddr = "10.77.0.1/24"
+	DefaultPool = "10.77.0.100-10.77.0.250"
+)
+
 // Network describes the phone LAN.
 type Network struct {
 	// Addr is Batter's address on it: the phones' gateway and DNS server.

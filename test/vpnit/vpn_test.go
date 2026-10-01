@@ -276,10 +276,10 @@ func TestVPNProfiles(t *testing.T) {
 		if code, body := api.do(t, "POST", "/api/v1/devices", map[string]string{"serial": "ITPHONE"}); code != http.StatusCreated {
 			t.Fatalf("register device: %d %s", code, body)
 		}
-		// There's no phone network, so applying fails; the assignment is
+		// The phone network is off, so applying fails; the assignment is
 		// stored and the reason reported.
 		code, body := api.do(t, "PUT", "/api/v1/devices/ITPHONE/tether", map[string]any{"profile_id": profileB})
-		if code != http.StatusOK || !strings.Contains(body, "no phone network") {
+		if code != http.StatusOK || !strings.Contains(body, "phone network is off") {
 			t.Fatalf("assign: %d %s", code, body)
 		}
 		code, body = api.do(t, "DELETE", "/api/v1/vpn/profiles/"+profileB, nil)
