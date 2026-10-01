@@ -1,6 +1,7 @@
 import { keycodeMap } from "./device-keymap";
 import { getToken } from "./auth";
 import { Reconnector } from "./reconnect";
+import { WheelGestures } from "./wheel-gesture";
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 
@@ -154,18 +155,13 @@ export class DeviceInputHandler {
     });
   };
 
+  // Two-finger swipes: vertical scrolls, horizontal drags (see WheelGestures).
+  private wheelGestures = new WheelGestures((msg) => this.send(msg));
+
   private handleWheel = (e: WheelEvent) => {
     e.preventDefault();
-    const { x, y } = this.getNormalizedCoords(e);
-    const scrollH = e.deltaX > 0 ? 1 : e.deltaX < 0 ? -1 : 0;
-    const scrollV = e.deltaY > 0 ? -1 : e.deltaY < 0 ? 1 : 0;
-    this.send({
-      type: "scroll",
-      x,
-      y,
-      scroll_h: scrollH,
-      scroll_v: scrollV,
-    });
+    if (!this.canvas) return;
+    this.wheelGestures.wheel(e, this.getNormalizedCoords(e), this.canvas.getBoundingClientRect());
   };
 
   private handleKeyDown = (e: KeyboardEvent) => {
@@ -245,6 +241,7 @@ export class DeviceInputHandler {
   }
 
   private detachListeners() {
+    this.wheelGestures.cancel();
     this.canvas.removeEventListener("mousedown", this.handleMouseDown);
     this.canvas.removeEventListener("mousemove", this.handleMouseMove);
     this.canvas.removeEventListener("mouseup", this.handleMouseUp);

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { DeviceVideoPlayer } from '@/lib/device-video';
 import { DeviceInputHandler } from '@/lib/device-input';
 import { fetchScreenshot, pushFile, installAPK } from '@/lib/api';
+import { useNoSwipeNavigation } from '@/lib/use-no-swipe-navigation';
 
 interface DeviceViewerProps {
   serial: string;
@@ -12,6 +13,7 @@ interface DeviceViewerProps {
 }
 
 export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
+  useNoSwipeNavigation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<DeviceVideoPlayer | null>(null);
