@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -138,10 +139,14 @@ func (m *Manager) ListDevices(ctx context.Context) ([]DeviceInfo, error) {
 	var result []DeviceInfo
 	for _, d := range devices {
 		info := DeviceInfo{
-			Serial:  d.Serial,
-			State:   d.State,
-			Model:   d.Model,
-			Product: d.Product,
+			Serial:     d.Serial,
+			State:      d.State,
+			Model:      d.Model,
+			Product:    d.Product,
+			Connection: "usb",
+		}
+		if ap, err := netip.ParseAddrPort(d.Transport); err == nil {
+			info.Connection, info.LANAddress = "lan", ap.Addr().String()
 		}
 		if s, ok := m.sessions[d.Serial]; ok {
 			info.HasSession = true
@@ -532,6 +537,10 @@ type DeviceInfo struct {
 	// VPNProfileID is set when the device is tethered, through that profile.
 	VPNProfileID   string `json:"vpn_profile_id,omitempty"`
 	VPNProfileName string `json:"vpn_profile_name,omitempty"`
+	// Connection is how adb reaches the device: "usb" or "lan" (ethernet
+	// adapter, adb over TCP at LANAddress).
+	Connection string `json:"connection,omitempty"`
+	LANAddress string `json:"lan_address,omitempty"`
 }
 
 // ValidateDevice checks whether a device is reachable via ADB and returns its state.

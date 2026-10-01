@@ -7,9 +7,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os/exec"
 	"regexp"
-	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,9 @@ type ADBDevice struct {
 	State   string `json:"state"`
 	Model   string `json:"model"`
 	Product string `json:"product"`
+	// Transport is what adb calls the device: its serial on USB, ip:port
+	// on the LAN.
+	Transport string `json:"-"`
 }
 
 // Default adb timeouts, applied when the caller's context has no deadline
@@ -60,6 +64,61 @@ type ADB struct {
 	listAt      time.Time
 	listDevices []ADBDevice
 	listErr     error
+
+	// lan maps a phone's serial to its adb-over-TCP transport (ip:port)
+	// while it's on the LAN. Every per-device call goes through it.
+	lanMu sync.RWMutex
+	lan   map[string]string
+}
+
+// SetTransport routes serial's adb calls to transport (ip:port) from now on.
+func (a *ADB) SetTransport(serial, transport string) {
+	a.lanMu.Lock()
+	defer a.lanMu.Unlock()
+	if a.lan == nil {
+		a.lan = map[string]string{}
+	}
+	a.lan[serial] = transport
+}
+
+// ClearTransport sends serial's adb calls to the serial itself (USB) again.
+func (a *ADB) ClearTransport(serial string) {
+	a.lanMu.Lock()
+	defer a.lanMu.Unlock()
+	delete(a.lan, serial)
+}
+
+// Transport returns what adb calls serial right now: its LAN transport if
+// it has one, else the serial itself.
+func (a *ADB) Transport(serial string) string {
+	a.lanMu.RLock()
+	defer a.lanMu.RUnlock()
+	if t, ok := a.lan[serial]; ok {
+		return t
+	}
+	return serial
+}
+
+// serialOf maps adb's name for a device back to its serial. ok is false for
+// a TCP transport no serial is mapped to.
+func (a *ADB) serialOf(transport string) (serial string, ok bool) {
+	a.lanMu.RLock()
+	defer a.lanMu.RUnlock()
+	for s, t := range a.lan {
+		if t == transport {
+			return s, true
+		}
+	}
+	if isNetworkTransport(transport) {
+		return "", false
+	}
+	return transport, true
+}
+
+// isNetworkTransport reports whether adb's device name is ip:port.
+func isNetworkTransport(name string) bool {
+	_, err := netip.ParseAddrPort(name)
+	return err == nil
 }
 
 // NewADB creates a new ADB wrapper, locating the adb binary in PATH.
@@ -86,7 +145,32 @@ func (a *ADB) ListDevices(ctx context.Context) ([]ADBDevice, error) {
 		a.listDevices, a.listErr = a.listDevicesUncached(ctx)
 		a.listAt = time.Now()
 	}
-	return slices.Clone(a.listDevices), a.listErr
+	if a.listErr != nil {
+		return nil, a.listErr
+	}
+	return a.bySerial(a.listDevices), nil
+}
+
+// ListTransports returns adb's own, uncached device list: TCP transports by
+// ip:port, whether or not a serial is mapped to them.
+func (a *ADB) ListTransports(ctx context.Context) ([]ADBDevice, error) {
+	return a.listDevicesUncached(ctx)
+}
+
+// bySerial names listed devices by serial. Unidentified TCP transports are
+// dropped, and a phone listed on USB and on the LAN keeps only the entry its
+// commands go to.
+func (a *ADB) bySerial(raw []ADBDevice) []ADBDevice {
+	var out []ADBDevice
+	for _, d := range raw {
+		serial, ok := a.serialOf(d.Transport)
+		if !ok || a.Transport(serial) != d.Transport {
+			continue
+		}
+		d.Serial = serial
+		out = append(out, d)
+	}
+	return out
 }
 
 func (a *ADB) listDevicesUncached(ctx context.Context) ([]ADBDevice, error) {
@@ -108,8 +192,9 @@ func (a *ADB) listDevicesUncached(ctx context.Context) ([]ADBDevice, error) {
 		}
 
 		dev := ADBDevice{
-			Serial: fields[0],
-			State:  fields[1],
+			Serial:    fields[0],
+			State:     fields[1],
+			Transport: fields[0],
 		}
 
 		// Parse key:value properties like model:Pixel_6 product:oriole
@@ -176,7 +261,7 @@ func (a *ADB) ShellSecret(ctx context.Context, serial string, args ...string) ([
 	if err := checkSerial(serial); err != nil {
 		return nil, err
 	}
-	cmdArgs := append([]string{"-s", serial, "shell"}, args...)
+	cmdArgs := append([]string{"-s", a.Transport(serial), "shell"}, args...)
 	ctx, cancel := a.withTimeout(ctx, cmdArgs)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, a.adbPath, cmdArgs...)
@@ -231,7 +316,7 @@ func (a *ADB) ServerShell(ctx context.Context, serial string, args ...string) ([
 	if err := checkSerial(serial); err != nil {
 		return nil, err
 	}
-	return a.exec(ctx, append([]string{"-s", serial, "shell"}, args...)...)
+	return a.exec(ctx, append([]string{"-s", a.Transport(serial), "shell"}, args...)...)
 }
 
 // withTimeout applies the default timeout for args unless ctx already has a
@@ -322,6 +407,58 @@ func (a *ADB) runWithSerial(ctx context.Context, serial string, args ...string) 
 	if err := checkSerial(serial); err != nil {
 		return nil, err
 	}
-	cmdArgs := append([]string{"-s", serial}, args...)
+	cmdArgs := append([]string{"-s", a.Transport(serial)}, args...)
 	return a.run(ctx, cmdArgs...)
+}
+
+// Connect makes adb connect to a phone's adbd over TCP at addr (ip:port).
+// adb reports a failed connect on stdout, often with exit status 0, so the
+// output decides.
+func (a *ADB) Connect(ctx context.Context, addr string) error {
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil || ap.Port() == 0 {
+		return fmt.Errorf("invalid adb address: %q", addr)
+	}
+	out, err := a.run(ctx, "connect", addr)
+	if err != nil {
+		return err
+	}
+	msg := strings.TrimSpace(string(out))
+	if strings.HasPrefix(msg, "connected to ") || strings.HasPrefix(msg, "already connected to ") {
+		return nil
+	}
+	return fmt.Errorf("adb connect %s: %s", addr, msg)
+}
+
+// Disconnect drops adb's TCP transport to addr.
+func (a *ADB) Disconnect(ctx context.Context, addr string) error {
+	if !isNetworkTransport(addr) {
+		return fmt.Errorf("invalid adb address: %q", addr)
+	}
+	_, err := a.run(ctx, "disconnect", addr)
+	return err
+}
+
+// TCPIP restarts the phone's adbd listening on TCP port, so it can be
+// reached over the LAN once it's there. It lasts until the phone reboots.
+func (a *ADB) TCPIP(ctx context.Context, serial string, port int) error {
+	_, err := a.runWithSerial(ctx, serial, "tcpip", strconv.Itoa(port))
+	return err
+}
+
+// SerialNo asks the phone behind transport for its serial (ro.serialno).
+// Not `adb get-serialno`: for a TCP transport that answers with ip:port.
+func (a *ADB) SerialNo(ctx context.Context, transport string) (string, error) {
+	if err := checkSerial(transport); err != nil {
+		return "", err
+	}
+	out, err := a.run(ctx, "-s", transport, "shell", "getprop", "ro.serialno")
+	if err != nil {
+		return "", err
+	}
+	serial := strings.TrimSpace(string(out))
+	if err := checkSerial(serial); err != nil || isNetworkTransport(serial) {
+		return "", fmt.Errorf("%s reported no usable serial (%q)", transport, serial)
+	}
+	return serial, nil
 }
