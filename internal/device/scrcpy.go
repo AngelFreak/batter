@@ -2,6 +2,7 @@ package device
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -90,6 +91,12 @@ type Session struct {
 	audioDisabledAt  time.Time     // when the device disabled audio, if it did
 	audioDone        chan struct{} // closed when audioReadLoop returns
 	videoEndedAt     time.Time     // written before done is closed
+
+	// Keyframe request throttling (see RequestKeyframe).
+	keyframeMu    sync.Mutex
+	keyframeEvery time.Duration // 0 = keyframeInterval
+	lastKeyframe  time.Time
+	keyframeTimer *time.Timer
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -403,8 +410,41 @@ func (s *Session) ReleaseControl(id string) {
 // RequestKeyframe makes the device send a new config packet and keyframe.
 // scrcpy only sends frames when the screen changes, so a viewer joining an
 // existing session would otherwise see nothing until something moves.
+//
+// Each request restarts the encoder, so they are throttled to one per
+// keyframeInterval: the first is sent at once, and any made during the
+// interval are served by a single reset at its end. That one is sent after
+// they joined, so none of them can miss its keyframe.
 func (s *Session) RequestKeyframe() error {
-	return s.WriteControl(EncodeResetVideo())
+	s.keyframeMu.Lock()
+	defer s.keyframeMu.Unlock()
+	if s.keyframeTimer != nil {
+		return nil // a trailing reset is already due
+	}
+	every := cmp.Or(s.keyframeEvery, keyframeInterval)
+	if wait := every - time.Since(s.lastKeyframe); wait > 0 {
+		s.keyframeTimer = time.AfterFunc(wait, func() {
+			s.keyframeMu.Lock()
+			defer s.keyframeMu.Unlock()
+			s.keyframeTimer = nil
+			if err := s.sendKeyframeLocked(); err != nil {
+				s.logger.Debug("deferred keyframe request failed", "error", err)
+			}
+		})
+		return nil
+	}
+	return s.sendKeyframeLocked()
+}
+
+// keyframeInterval is the minimum gap between encoder resets.
+const keyframeInterval = 2 * time.Second
+
+func (s *Session) sendKeyframeLocked() error {
+	if err := s.WriteControl(EncodeResetVideo()); err != nil {
+		return err
+	}
+	s.lastKeyframe = time.Now()
+	return nil
 }
 
 func (s *Session) WriteControl(data []byte) error {
