@@ -1,0 +1,20 @@
+# Keep the build context small and free of host-specific artifacts.
+# In particular, host web/node_modules must never overwrite the image's
+# `npm ci` install (native binaries like @next/swc differ glibc vs musl).
+.git
+.env
+.env.*
+!.env.example
+/batter
+bin/
+data/
+docs/
+web/node_modules/
+web/.next/
+web/out/
+web/mockups/
+web/tsconfig.tsbuildinfo
+.claude/
+.claude-flow/
+.playwright-mcp/
+*.apk
