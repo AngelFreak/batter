@@ -9,6 +9,7 @@ import (
 	"github.com/XpertaDK/batter/internal/api/middleware"
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
+	"github.com/XpertaDK/batter/internal/tether"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,6 +23,8 @@ type RouterConfig struct {
 	AllowedOrigins []string
 	// TrustedProxies whose X-Forwarded-For is believed; nil trusts none.
 	TrustedProxies []string
+	// Tether drives per-device reverse tethering; nil if unavailable.
+	Tether *tether.Controller
 }
 
 // NewRouter creates and configures the Gin router with all routes.
@@ -54,6 +57,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	userHandler := handlers.NewUserHandler(cfg.DB, cfg.Logger)
 	groupHandler := handlers.NewGroupHandler(cfg.DB, cfg.DeviceManager, cfg.Logger)
 	userGroupHandler := handlers.NewUserGroupHandler(cfg.DB, cfg.Logger)
+	tetherHandler := handlers.NewTetherHandler(cfg.DB, cfg.Tether, cfg.Logger)
 
 	// API v1
 	v1 := r.Group("/api/v1")
@@ -112,6 +116,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 					deviceBySerial.POST("/push", control, deviceHandler.PushFile)
 					deviceBySerial.POST("/install", control, deviceHandler.InstallAPK)
 					deviceBySerial.PUT("", manage, deviceHandler.UpdateDevice)
+					deviceBySerial.PUT("/tether", manage, tetherHandler.SetTether)
 					deviceBySerial.DELETE("", manage, deviceHandler.DeleteDevice)
 				}
 			}

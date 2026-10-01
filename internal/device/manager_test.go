@@ -108,3 +108,42 @@ func TestSessionOpsOnSameDeviceAreSerialized(t *testing.T) {
 		t.Fatalf("%d concurrent adb calls for SLOW, want 1 (second start should wait)", n)
 	}
 }
+
+func TestSessionTeardownKeepsOtherReverseTunnels(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := filepath.Join(dir, "adb")
+	// `reverse --list` reports a tethering tunnel next to scrcpy's.
+	err := os.WriteFile(script, []byte(`#!/bin/sh
+echo "$@" >> "`+calls+`"
+case "$*" in
+  *"reverse --list"*) printf 'UsbFfs localabstract:gnirehtet tcp:31416\nUsbFfs localabstract:scrcpy_1a2b3c4d tcp:40000\n' ;;
+esac
+`), 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{adb: &ADB{adbPath: script, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+
+	m.killDeviceServer(context.Background(), "S1")
+
+	b, _ := os.ReadFile(calls)
+	got := string(b)
+	if strings.Contains(got, "--remove-all") {
+		t.Fatalf("teardown removed every reverse tunnel (breaks tethering):\n%s", got)
+	}
+	if !strings.Contains(got, "reverse --remove localabstract:scrcpy_1a2b3c4d") {
+		t.Fatalf("scrcpy tunnel not removed:\n%s", got)
+	}
+	if strings.Contains(got, "--remove localabstract:gnirehtet") {
+		t.Fatalf("tethering tunnel removed:\n%s", got)
+	}
+}
+
+func TestListReverseParsesDeviceSideSpecs(t *testing.T) {
+	got := parseReverseList("UsbFfs localabstract:gnirehtet tcp:31416\nhost-12 localabstract:scrcpy_00ff tcp:40000\n\n")
+	want := []string{"localabstract:gnirehtet", "localabstract:scrcpy_00ff"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("parseReverseList = %v, want %v", got, want)
+	}
+}

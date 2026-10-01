@@ -11,14 +11,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/XpertaDK/batter/internal/api"
+	"github.com/XpertaDK/batter/internal/api/handlers"
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/XpertaDK/batter/internal/migrate"
+	"github.com/XpertaDK/batter/internal/tether"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -68,6 +71,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		DB:            db,
 		JWTManager:    env.jwt,
 		Logger:        logger,
+		Tether:        &tether.Controller{ADB: dm.ADB(), APK: "/nonexistent/gnirehtet.apk", Logger: logger},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -215,6 +219,7 @@ func TestDeviceRoutesEnforcePermissionLevels(t *testing.T) {
 		{"POST", base + "/install", "", "control"},
 		// Changing Batter's record of the device.
 		{"PUT", base, `{"nickname":"n"}`, "manage"},
+		{"PUT", base + "/tether", `{"enabled":false}`, "manage"},
 		{"DELETE", base, "", "manage"},
 	}
 	users := map[string]int{"stranger": -1, "viewer": 0, "controller": 1, "manager": 2, "admin": 99}
@@ -405,5 +410,58 @@ func TestScreenLockEndpointsNeedOperator(t *testing.T) {
 		if w := env.do(t, "operator", rt.method, rt.path, rt.body); w.Code == http.StatusForbidden || w.Code == http.StatusNotFound {
 			t.Fatalf("%s %s as operator: status %d", rt.method, rt.path, w.Code)
 		}
+	}
+}
+
+func TestTetherToggleNeedsManageAndPersists(t *testing.T) {
+	env := newTestEnv(t)
+	path := "/api/v1/devices/" + testSerial + "/tether"
+
+	for _, user := range []string{"viewer", "controller"} {
+		if w := env.do(t, user, "PUT", path, `{"enabled":true}`); w.Code != http.StatusForbidden {
+			t.Fatalf("%s: status %d, want 403", user, w.Code)
+		}
+	}
+
+	// The test device isn't attached, so applying fails, but the setting is
+	// kept and applied when the device connects.
+	w := env.do(t, "manager", "PUT", path, `{"enabled":true}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("manager: status %d; body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		ReverseTether bool   `json:"reverse_tether"`
+		ApplyError    string `json:"apply_error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || !resp.ReverseTether || resp.ApplyError == "" {
+		t.Fatalf("want reverse_tether=true and the apply error reported; body: %s", w.Body.String())
+	}
+	var stored bool
+	if err := env.db.QueryRow(context.Background(), "SELECT reverse_tether FROM devices WHERE serial = $1", testSerial).Scan(&stored); err != nil || !stored {
+		t.Fatalf("reverse_tether not stored (got %v, err %v)", stored, err)
+	}
+
+	// The reconcile loop sees the stored setting (and applies it on connect).
+	if serials, err := handlers.TetherEnabledSerials(context.Background(), env.db); err != nil || !slices.Equal(serials, []string{testSerial}) {
+		t.Fatalf("TetherEnabledSerials = %v, %v; want [%s]", serials, err, testSerial)
+	}
+
+	w = env.do(t, "manager", "GET", "/api/v1/devices/"+testSerial, "")
+	var dev struct {
+		ReverseTether bool `json:"reverse_tether"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &dev); err != nil || !dev.ReverseTether {
+		t.Fatalf("GET device doesn't report reverse_tether=true: %s", w.Body.String())
+	}
+
+	if w := env.do(t, "manager", "PUT", path, `{"enabled":false}`); w.Code != http.StatusOK {
+		t.Fatalf("disable: status %d", w.Code)
+	}
+	if err := env.db.QueryRow(context.Background(), "SELECT reverse_tether FROM devices WHERE serial = $1", testSerial).Scan(&stored); err != nil || stored {
+		t.Fatalf("reverse_tether still set after disable")
+	}
+
+	if w := env.do(t, "admin", "PUT", "/api/v1/devices/NOSUCHDEVICE/tether", `{"enabled":true}`); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown device: status %d, want 404", w.Code)
 	}
 }

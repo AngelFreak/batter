@@ -113,6 +113,7 @@ export interface DeviceInfo {
   height?: number;
   session_tier?: 'thumbnail' | 'full';
   last_seen_at?: string;
+  reverse_tether: boolean;
 }
 
 export async function pushFile(serial: string, file: File) {
@@ -284,6 +285,23 @@ export async function updateDevice(serial: string, data: { nickname?: string; mo
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error('Failed to update device');
+  return res.json();
+}
+
+// Turns reverse tethering on or off. The setting is saved even when it can't
+// be applied right now (e.g. the device is unplugged); apply_error says why.
+export async function setTether(
+  serial: string,
+  enabled: boolean,
+): Promise<{ reverse_tether: boolean; apply_error?: string }> {
+  const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}/tether`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to change reverse tethering');
+  }
   return res.json();
 }
 

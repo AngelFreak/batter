@@ -109,6 +109,12 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}, nil
 }
 
+// ADB returns the manager's adb client, for features (reverse tethering)
+// that drive devices outside of scrcpy sessions.
+func (m *Manager) ADB() *ADB {
+	return m.adb
+}
+
 // ListDevices returns all connected ADB devices with session status.
 func (m *Manager) ListDevices(ctx context.Context) ([]DeviceInfo, error) {
 	devices, err := m.adb.ListDevices(ctx)
@@ -171,10 +177,20 @@ func (m *Manager) detachSession(serial string) *Session {
 }
 
 // killDeviceServer force-kills any lingering scrcpy-server on the device and
-// removes reverse tunnels so a new session can bind its abstract socket.
+// removes scrcpy's reverse tunnels so a new session can bind its abstract
+// socket. Other tunnels (reverse tethering) are left in place.
 func (m *Manager) killDeviceServer(ctx context.Context, serial string) {
 	_, _ = m.adb.Shell(ctx, serial, "pkill", "-9", "-f", "app_process.*scrcpy")
-	_, _ = m.adb.run(ctx, "-s", serial, "reverse", "--remove-all")
+	specs, err := m.adb.ListReverse(ctx, serial)
+	if err != nil {
+		m.logger.Debug("list reverse tunnels", "serial", serial, "error", err)
+		return
+	}
+	for _, spec := range specs {
+		if name, ok := strings.CutPrefix(spec, "localabstract:"); ok && strings.HasPrefix(name, "scrcpy_") {
+			_ = m.adb.RemoveReverse(ctx, serial, name)
+		}
+	}
 }
 
 // StartSession starts a scrcpy session for a device. If a dead session exists, it is replaced.
@@ -457,6 +473,7 @@ type DeviceInfo struct {
 	Height         int         `json:"height,omitempty"`
 	SessionTier    SessionTier `json:"session_tier,omitempty"`
 	LastSeenAt     *time.Time  `json:"last_seen_at,omitempty"`
+	ReverseTether  bool        `json:"reverse_tether"`
 }
 
 // ValidateDevice checks whether a device is reachable via ADB and returns its state.
