@@ -112,7 +112,12 @@ export interface DeviceInfo {
   width?: number;
   height?: number;
   session_tier?: 'thumbnail' | 'full';
+  // Bitrate level of the full-quality session, shared by all its viewers.
+  session_quality?: 'low' | 'medium' | 'high';
   last_seen_at?: string;
+  // Set when the device is tethered: its traffic goes through this profile.
+  vpn_profile_id?: string;
+  vpn_profile_name?: string;
 }
 
 export async function pushFile(serial: string, file: File) {
@@ -186,9 +191,16 @@ export async function stopSession(serial: string) {
   return res.json();
 }
 
-export async function upgradeSession(serial: string) {
+// Switches the device's session to full quality. quality picks the bitrate
+// level (the session is shared: the latest level wins for every viewer);
+// change marks a viewer already watching that only switches level.
+export async function upgradeSession(
+  serial: string,
+  opts: { quality?: 'low' | 'medium' | 'high'; change?: boolean } = {},
+): Promise<{ session_tier: string; quality?: 'low' | 'medium' | 'high' }> {
   const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}/session/upgrade`, {
     method: 'POST',
+    body: JSON.stringify(opts),
   });
   if (!res.ok) throw new Error('Failed to upgrade session');
   return res.json();
@@ -251,12 +263,57 @@ export async function probeDevice(serial: string): Promise<{ serial: string; mod
   return res.json();
 }
 
+export interface ScreenLockState {
+  /** Android's credential type: "NONE", "PIN", "PASSWORD", "PATTERN", ... */
+  credential: string;
+  /** Lock screen skipped entirely (no swipe). */
+  disabled: boolean;
+}
+
+async function screenLockResult(res: Response, fallback: string): Promise<ScreenLockState> {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || fallback);
+  return body;
+}
+
+export async function getScreenLock(serial: string): Promise<ScreenLockState> {
+  const res = await fetchWithAuth(`/api/v1/devices/lock/${encodeURIComponent(serial)}`);
+  return screenLockResult(res, 'Failed to read screen lock');
+}
+
+/** Removes the phone's PIN/password/pattern (one attempt) and the swipe screen. */
+export async function removeScreenLock(serial: string, credential: string): Promise<ScreenLockState> {
+  const res = await fetchWithAuth(`/api/v1/devices/lock/${encodeURIComponent(serial)}/remove`, {
+    method: 'POST',
+    body: JSON.stringify({ credential }),
+  });
+  return screenLockResult(res, 'Failed to remove screen lock');
+}
+
 export async function updateDevice(serial: string, data: { nickname?: string; model?: string; product?: string }) {
   const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error('Failed to update device');
+  return res.json();
+}
+
+// Tethers the device through a VPN profile, or turns tethering off (null).
+// The setting is saved even when it can't be applied right now (e.g. the
+// device is unplugged); apply_error says why.
+export async function setTether(
+  serial: string,
+  profileId: string | null,
+): Promise<{ vpn_profile_id: string | null; apply_error?: string }> {
+  const res = await fetchWithAuth(`/api/v1/devices/${encodeURIComponent(serial)}/tether`, {
+    method: 'PUT',
+    body: JSON.stringify({ profile_id: profileId }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to change internet sharing');
+  }
   return res.json();
 }
 
@@ -612,4 +669,85 @@ export async function revokeUserGroupAccess(id: string, accessId: string) {
   });
   if (!res.ok) throw new Error('Failed to revoke access');
   return res.json();
+}
+
+// VPN profiles: tethered phones reach the internet through one. Managing
+// them is admin-only; anyone may list their names to choose a phone's. The
+// server never returns a profile's private or preshared keys.
+export interface VPNProfile {
+  id: string;
+  name: string;
+  enabled: boolean;
+  devices: number;
+  config: {
+    public_key: string;
+    addresses: string[];
+    dns: string[] | null;
+    mtu?: number;
+    peers: {
+      public_key: string;
+      has_preshared_key: boolean;
+      endpoint: string;
+      allowed_ips: string[];
+      persistent_keepalive?: number;
+    }[];
+  };
+  status?: {
+    up: boolean;
+    peers: {
+      public_key: string;
+      endpoint?: string;
+      latest_handshake?: string;
+      rx_bytes: number;
+      tx_bytes: number;
+    }[];
+  };
+  apply_error?: string;
+}
+
+export interface VPNProfileName {
+  id: string;
+  name: string;
+}
+
+async function vpnRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetchWithAuth(`/api/v1/vpn${path}`, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'VPN request failed');
+  return data;
+}
+
+export async function listVPNProfiles(): Promise<VPNProfile[]> {
+  return (await vpnRequest<{ profiles: VPNProfile[] }>('GET', '/profiles')).profiles;
+}
+
+export async function listVPNProfileNames(): Promise<VPNProfileName[]> {
+  return (await vpnRequest<{ profiles: VPNProfileName[] }>('GET', '/profile-names')).profiles;
+}
+
+export function createVPNProfile(name: string, config: string, enabled = true): Promise<VPNProfile> {
+  return vpnRequest('POST', '/profiles', { name, config, enabled });
+}
+
+// Omitted fields are kept, so the config (and its key) needn't be re-sent.
+export function updateVPNProfile(
+  id: string,
+  changes: { name?: string; config?: string; enabled?: boolean },
+): Promise<VPNProfile> {
+  return vpnRequest('PUT', `/profiles/${encodeURIComponent(id)}`, changes);
+}
+
+// Deleting a profile turns tethering off on its phones.
+export function deleteVPNProfile(id: string): Promise<{ devices_turned_off: string[] | null }> {
+  return vpnRequest('DELETE', `/profiles/${encodeURIComponent(id)}`);
+}
+
+// Where the profile's phones' traffic currently exits; error if it can't get
+// out (with the profile enabled, that's the kill switch holding while its
+// tunnel is down).
+export function checkVPNProfileExitIP(id: string): Promise<{ exit_ip?: string; error?: string }> {
+  return vpnRequest('POST', `/profiles/${encodeURIComponent(id)}/check`);
 }

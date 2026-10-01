@@ -49,9 +49,10 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 
 	// 1. Fetch all registered devices from DB
 	rows, err := h.db.Query(ctx,
-		`SELECT serial, model, product, COALESCE(nickname, ''), COALESCE(android_version, ''),
-		        status, last_seen_at
-		 FROM devices ORDER BY created_at`,
+		`SELECT d.serial, d.model, d.product, COALESCE(d.nickname, ''), COALESCE(d.android_version, ''),
+		        d.status, d.last_seen_at, COALESCE(d.vpn_profile_id::text, ''), COALESCE(p.name, '')
+		 FROM devices d LEFT JOIN vpn_profiles p ON p.id = d.vpn_profile_id
+		 ORDER BY d.created_at`,
 	)
 	if err != nil {
 		return nil, err
@@ -66,6 +67,8 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 		AndroidVersion string
 		Status         string
 		LastSeenAt     *time.Time
+		VPNProfileID   string
+		VPNProfileName string
 	}
 	var dbDevices []dbDevice
 	dbMap := make(map[string]*dbDevice)
@@ -73,7 +76,7 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 	for rows.Next() {
 		var d dbDevice
 		if err := rows.Scan(&d.Serial, &d.Model, &d.Product, &d.Nickname, &d.AndroidVersion,
-			&d.Status, &d.LastSeenAt); err != nil {
+			&d.Status, &d.LastSeenAt, &d.VPNProfileID, &d.VPNProfileName); err != nil {
 			continue
 		}
 		dbDevices = append(dbDevices, d)
@@ -113,6 +116,8 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 			AndroidVersion: d.AndroidVersion,
 			LastSeenAt:     d.LastSeenAt,
 			Status:         d.Status,
+			VPNProfileID:   d.VPNProfileID,
+			VPNProfileName: d.VPNProfileName,
 		}
 
 		if adb, ok := adbMap[d.Serial]; ok {
@@ -122,6 +127,7 @@ func (h *DeviceHandler) mergeDevices(c *gin.Context) ([]device.DeviceInfo, error
 			info.Width = adb.Width
 			info.Height = adb.Height
 			info.SessionTier = adb.SessionTier
+			info.SessionQuality = adb.SessionQuality
 
 			// Update model/product from ADB if DB has empty values
 			if info.Model == "" && adb.Model != "" {
@@ -459,11 +465,35 @@ func (h *DeviceHandler) StopSession(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "session stopped"})
 }
 
-// UpgradeSession switches a device session to full quality.
+// UpgradeSessionRequest is the optional body of POST .../session/upgrade.
+type UpgradeSessionRequest struct {
+	// Quality is low, medium or high (default medium).
+	Quality string `json:"quality"`
+	// Change marks a viewer that is already watching switching level, so
+	// it isn't counted as another full-quality viewer.
+	Change bool `json:"change"`
+}
+
+// UpgradeSession switches a device session to full quality at the
+// requested level. The device's session is shared: the latest level wins
+// for everyone watching.
 func (h *DeviceHandler) UpgradeSession(c *gin.Context) {
 	serial := c.Param("serial")
 
-	session, err := h.deviceManager.UpgradeSession(c.Request.Context(), serial)
+	var req UpgradeSessionRequest
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+	}
+	quality, err := device.ParseQuality(req.Quality)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	session, err := h.deviceManager.UpgradeSession(c.Request.Context(), serial, quality, req.Change)
 	if err != nil {
 		h.logger.Error("failed to upgrade session", "serial", serial, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -475,6 +505,7 @@ func (h *DeviceHandler) UpgradeSession(c *gin.Context) {
 		"width":        session.Width,
 		"height":       session.Height,
 		"session_tier": h.deviceManager.GetSessionTier(serial),
+		"quality":      h.deviceManager.GetSessionQuality(serial),
 	})
 }
 

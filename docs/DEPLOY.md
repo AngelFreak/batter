@@ -100,8 +100,10 @@ Trust it once per computer to get rid of the warning:
 The authority's key stays on the box (in the `caddy_data` volume) and is kept
 across updates, so this is a one-time step per computer.
 
-Port 3000 (plain HTTP) is only reachable from the box itself; everything else
-goes through HTTPS on port 443 (port 80 redirects to it).
+Ports 3000 (the web app) and 8080 (the API) are plain HTTP and only reachable
+from the box itself; everything else goes through HTTPS on port 443 (port 80
+redirects to it). Caddy sends API and live-video requests straight to port
+8080 and the rest to 3000.
 
 ## 7. Day-to-day
 
@@ -130,6 +132,11 @@ The database is the only thing that needs backing up:
 docker compose exec postgres pg_dump -U batter batter > batter-$(date +%F).sql
 ```
 
+The dump contains the VPN profiles' WireGuard private keys (anyone holding
+it can use those VPN accounts), so store it as you would a password: not
+world-readable, not in a shared folder, and encrypted if it leaves the
+server.
+
 Restore into a fresh install:
 
 ```bash
@@ -150,8 +157,21 @@ full list. The ones you might touch:
 | Setting | Default | When to change it |
 |---|---|---|
 | `BATTER_PORT` | `127.0.0.1:3000` | Only for direct plain-HTTP access to the app port. |
+| `BATTER_API_PORT` | `8080` | If port 8080 is already taken on the box (it is bound on 127.0.0.1 only). |
 | `LOG_LEVEL` | `info` | `debug` when troubleshooting. |
 | `ALLOWED_ORIGINS` | same host only | Only if the UI is served from another domain. |
+
+### Remote viewers on slow links
+
+Live video is latency-first: a viewer whose connection can't keep up skips
+ahead to the newest picture instead of falling behind. For that to work over
+slow or relayed links (e.g. NetBird via a relay), also stop the box's kernel
+from queueing seconds of video per connection. Run once on the box (it
+persists across reboots):
+
+```bash
+echo "net.ipv4.tcp_notsent_lowat = 131072" | sudo tee /etc/sysctl.d/90-batter-latency.conf && sudo sysctl -p /etc/sysctl.d/90-batter-latency.conf
+```
 
 ## 9. Troubleshooting
 
@@ -163,4 +183,5 @@ full list. The ones you might touch:
 | Live view says **needs-https** | You opened `http://…:3000`; use `https://<box-ip>` instead. |
 | Certificate warning every time | Trust `https://<box-ip>/ca.crt` as in step 6, then restart the browser. |
 | HTTPS doesn't load | Ports 80 and 443 must be free on the box: `sudo ss -ltnp 'sport = :443'`. Check `docker compose logs caddy`. |
+| Pages load but nothing works (API errors 502) | Port 8080 on the box may be taken by something else: `sudo ss -ltnp 'sport = :8080'`. Set `BATTER_API_PORT` to a free port in `.env` and `docker compose up -d`. |
 | `batter` container isn't `healthy` | `docker compose logs batter` — a database or migration error is printed at startup. |

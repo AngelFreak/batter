@@ -18,6 +18,7 @@ const (
 	ControlTypeSetClipboard       = 9
 	ControlTypeSetScreenPowerMode = 10
 	ControlTypeRotateDevice       = 11
+	ControlTypeResetVideo         = 17 // scrcpy 3.x
 )
 
 // Clipboard copy-key constants for EncodeGetClipboard.
@@ -140,6 +141,12 @@ func EncodeScrollEvent(x, y float32, width, height uint16, scrollH, scrollV int3
 // EncodeBackOrScreenOn encodes a scrcpy back-or-screen-on control message.
 // If screen is off, this wakes it. If screen is on, this sends BACK.
 // Format: type(1) + action(1) = 2 bytes
+// EncodeResetVideo asks the device to restart its video encoder, which emits a
+// fresh config packet and keyframe.
+func EncodeResetVideo() []byte {
+	return []byte{ControlTypeResetVideo}
+}
+
 func EncodeBackOrScreenOn(action uint8) []byte {
 	return []byte{ControlTypeBackOrScreenOn, action}
 }

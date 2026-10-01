@@ -9,6 +9,8 @@ import (
 	"github.com/XpertaDK/batter/internal/api/middleware"
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
+	"github.com/XpertaDK/batter/internal/tether"
+	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,6 +24,10 @@ type RouterConfig struct {
 	AllowedOrigins []string
 	// TrustedProxies whose X-Forwarded-For is believed; nil trusts none.
 	TrustedProxies []string
+	// Tether drives per-device reverse tethering; nil if unavailable.
+	Tether *tether.Controller
+	// VPN manages the VPN profiles tethered devices' traffic goes through.
+	VPN *vpn.Service
 }
 
 // NewRouter creates and configures the Gin router with all routes.
@@ -54,6 +60,8 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	userHandler := handlers.NewUserHandler(cfg.DB, cfg.Logger)
 	groupHandler := handlers.NewGroupHandler(cfg.DB, cfg.DeviceManager, cfg.Logger)
 	userGroupHandler := handlers.NewUserGroupHandler(cfg.DB, cfg.Logger)
+	tetherHandler := handlers.NewTetherHandler(cfg.DB, cfg.Tether, cfg.VPN, cfg.Logger)
+	vpnHandler := handlers.NewVPNHandler(cfg.VPN, cfg.Tether, cfg.Logger)
 
 	// API v1
 	v1 := r.Group("/api/v1")
@@ -90,6 +98,8 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 					preReg.GET("/discover", deviceHandler.DiscoverDevices)
 					preReg.POST("/validate/:serial", deviceHandler.ValidateDevice)
 					preReg.POST("/probe/:serial", deviceHandler.ProbeDevice)
+					preReg.GET("/lock/:serial", deviceHandler.ScreenLock)
+					preReg.POST("/lock/:serial/remove", deviceHandler.RemoveScreenLock)
 				}
 
 				// Per-device endpoints. "view" covers watching (which needs a
@@ -110,6 +120,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 					deviceBySerial.POST("/push", control, deviceHandler.PushFile)
 					deviceBySerial.POST("/install", control, deviceHandler.InstallAPK)
 					deviceBySerial.PUT("", manage, deviceHandler.UpdateDevice)
+					deviceBySerial.PUT("/tether", manage, tetherHandler.SetTether)
 					deviceBySerial.DELETE("", manage, deviceHandler.DeleteDevice)
 				}
 			}
@@ -155,6 +166,22 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 				users.PUT("/:id/password", userHandler.ResetPassword)
 			}
 
+			// VPN profiles. Anyone may list their names (choosing a phone's
+			// profile needs only the device's "manage" permission); the
+			// profiles themselves hold private keys and decide where phones'
+			// traffic exits, so managing them is admin-only.
+			protected.GET("/vpn/profile-names", vpnHandler.ProfileNames)
+			vpnRoutes := protected.Group("/vpn/profiles")
+			vpnRoutes.Use(middleware.RequireRole("admin"))
+			{
+				vpnRoutes.GET("", vpnHandler.ListProfiles)
+				vpnRoutes.POST("", vpnHandler.CreateProfile)
+				vpnRoutes.GET("/:id", vpnHandler.GetProfile)
+				vpnRoutes.PUT("/:id", vpnHandler.UpdateProfile)
+				vpnRoutes.DELETE("/:id", vpnHandler.DeleteProfile)
+				vpnRoutes.POST("/:id/check", vpnHandler.CheckExitIP)
+			}
+
 			// User groups / teams (admin only)
 			userGroups := protected.Group("/user-groups")
 			userGroups.Use(middleware.RequireRole("admin"))
@@ -186,6 +213,11 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 		wsGroup.GET("/device/:serial/control",
 			middleware.RequireDevicePermission(cfg.DB, "control"),
 			deviceWSHandler.ControlStream,
+		)
+		// Audio: like video, anyone who may watch may listen
+		wsGroup.GET("/device/:serial/audio",
+			middleware.RequireDevicePermission(cfg.DB, "view"),
+			deviceWSHandler.AudioStream,
 		)
 	}
 

@@ -6,8 +6,10 @@ import { listDevices, DeviceInfo } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { MultiplexerInputHandler } from '@/lib/device-input-multiplexer';
 import { MultiplexerGrid } from '@/components/device/multiplexer-grid';
+import { useNoSwipeNavigation } from '@/lib/use-no-swipe-navigation';
 
 export default function MultiplexerPage() {
+  useNoSwipeNavigation();
   const router = useRouter();
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [loading, setLoading] = useState(true);

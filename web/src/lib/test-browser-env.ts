@@ -42,15 +42,31 @@ export function installBrowserEnv() {
   g.document = { addEventListener() {}, removeEventListener() {} };
 }
 
-export function fakeCanvas() {
+export type FakeCanvas = HTMLCanvasElement & {
+  /** Fire a DOM event at the canvas's registered listeners. */
+  fire(type: string, event?: Record<string, unknown>): void;
+};
+
+export function fakeCanvas(): FakeCanvas {
+  const listeners = new Map<string, Set<(e: unknown) => void>>();
   return {
     width: 0,
     height: 0,
     getContext: () => ({ drawImage() {} }),
-    addEventListener() {},
-    removeEventListener() {},
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1, height: 1 }),
-  } as unknown as HTMLCanvasElement;
+    addEventListener(type: string, fn: (e: unknown) => void) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type)!.add(fn);
+    },
+    removeEventListener(type: string, fn: (e: unknown) => void) {
+      listeners.get(type)?.delete(fn);
+    },
+    // 400x800 at the page origin, so clientX/Y map to x/400, y/800.
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 800 }),
+    fire(type: string, event: Record<string, unknown> = {}) {
+      const e = { preventDefault() {}, ...event };
+      listeners.get(type)?.forEach((fn) => fn(e));
+    },
+  } as unknown as FakeCanvas;
 }
 
 /** A small binary video packet (12-byte header, non-config) — enough to count as data. */

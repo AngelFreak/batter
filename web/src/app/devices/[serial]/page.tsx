@@ -5,6 +5,7 @@ import { useRouter, useParams } from 'next/navigation';
 import { DeviceViewer } from '@/components/device/device-viewer';
 import { getDevice, startSession, stopSession, upgradeSession, downgradeSession, DeviceInfo } from '@/lib/api';
 import { getToken } from '@/lib/auth';
+import { QUALITY_LEVELS, storedQuality, storeQuality, upgradeAtStoredQuality, type VideoQuality } from '@/lib/video-quality';
 
 export default function DeviceDetailPage() {
   const router = useRouter();
@@ -13,6 +14,8 @@ export default function DeviceDetailPage() {
   const [device, setDevice] = useState<DeviceInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [quality, setQuality] = useState<VideoQuality>('medium');
+  const [changingQuality, setChangingQuality] = useState(false);
 
   useEffect(() => {
     if (!getToken()) {
@@ -31,7 +34,7 @@ export default function DeviceDetailPage() {
         if (!d.has_session) {
           await startSession(serial);
         }
-        await upgradeSession(serial);
+        await upgradeAtStoredQuality(serial, upgradeSession);
 
         // Refresh device info
         const updated = await getDevice(serial);
@@ -50,6 +53,33 @@ export default function DeviceDetailPage() {
       downgradeSession(serial).catch(() => {});
     };
   }, [serial]);
+
+  useEffect(() => setQuality(storedQuality()), []);
+
+  // The session is shared, so someone else may change its level; keep the
+  // shown level current.
+  useEffect(() => {
+    const t = setInterval(() => {
+      getDevice(serial).then(setDevice).catch(() => {});
+    }, 5000);
+    return () => clearInterval(t);
+  }, [serial]);
+
+  const handleQuality = async (q: VideoQuality) => {
+    setQuality(q);
+    storeQuality(q);
+    setChangingQuality(true);
+    try {
+      await upgradeSession(serial, { quality: q, change: true });
+      setDevice(await getDevice(serial));
+    } catch {
+      // The viewer reconnects on its own; the shown level updates on poll.
+    } finally {
+      setChangingQuality(false);
+    }
+  };
+
+  const sessionQuality = device?.session_quality;
 
   // The stream drops when the backend restarts (sessions don't survive it).
   // Start a fresh session before the viewer reconnects; this is a no-op on
@@ -81,12 +111,32 @@ export default function DeviceDetailPage() {
             </span>
             <span className="text-[10px] text-gray-500">{serial}</span>
           </div>
+          <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-[10px] text-gray-400">
+            Quality
+            <select
+              value={quality}
+              onChange={(e) => handleQuality(e.target.value as VideoQuality)}
+              disabled={changingQuality}
+              className="px-2 py-1 text-[10px] bg-gray-800 border border-gray-700 rounded text-gray-200 disabled:opacity-50"
+            >
+              {QUALITY_LEVELS.map((l) => (
+                <option key={l.value} value={l.value}>{l.label}</option>
+              ))}
+            </select>
+          </label>
+          {sessionQuality && sessionQuality !== quality && !changingQuality && (
+            <span className="text-[10px] text-yellow-400" title="The session is shared; the latest choice applies to everyone watching.">
+              Now {sessionQuality} (changed by another viewer)
+            </span>
+          )}
           <button
             onClick={handleStop}
             className="px-3 py-2 text-xs bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-lg"
           >
             Stop Session
           </button>
+          </div>
         </div>
 
         {/* Viewer */}

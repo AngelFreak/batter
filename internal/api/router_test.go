@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +21,8 @@ import (
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/XpertaDK/batter/internal/migrate"
+	"github.com/XpertaDK/batter/internal/tether"
+	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -40,6 +44,43 @@ type testEnv struct {
 	db     *pgxpool.Pool
 	jwt    *auth.JWTManager
 	users  map[string]string // username -> id
+	adb    *unpluggedADB
+}
+
+// unpluggedADB records tethering's adb calls and fails them all, as for a
+// device that isn't attached.
+type unpluggedADB struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (a *unpluggedADB) fail(serial string, args ...string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, serial+" "+strings.Join(args, " "))
+	return fmt.Errorf("device '%s' not found", serial)
+}
+
+func (a *unpluggedADB) called(prefix string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.ContainsFunc(a.calls, func(c string) bool { return strings.HasPrefix(c, prefix) })
+}
+
+func (a *unpluggedADB) Shell(_ context.Context, serial string, args ...string) ([]byte, error) {
+	return nil, a.fail(serial, append([]string{"shell"}, args...)...)
+}
+func (a *unpluggedADB) Install(_ context.Context, serial, apk string) ([]byte, error) {
+	return nil, a.fail(serial, "install", apk)
+}
+func (a *unpluggedADB) Reverse(_ context.Context, serial, name string, port int) error {
+	return a.fail(serial, "reverse", name, fmt.Sprint(port))
+}
+func (a *unpluggedADB) RemoveReverse(_ context.Context, serial, name string) error {
+	return a.fail(serial, "reverse", "--remove", name)
+}
+func (a *unpluggedADB) ListReverse(_ context.Context, serial string) (map[string]string, error) {
+	return nil, a.fail(serial, "reverse", "--list")
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -62,12 +103,22 @@ func newTestEnv(t *testing.T) *testEnv {
 		db:    db,
 		jwt:   auth.NewJWTManager("test-secret", 3600),
 		users: map[string]string{},
+		adb:   &unpluggedADB{},
 	}
+	vpnSvc := &vpn.Service{
+		DB: db,
+		// Never touch the test machine's network or start relays.
+		Run:    func(context.Context, string, string, ...string) ([]byte, error) { return nil, nil },
+		Logger: logger,
+	}
+	t.Cleanup(vpnSvc.Stop)
 	router, err := api.NewRouter(api.RouterConfig{
 		DeviceManager: dm,
 		DB:            db,
 		JWTManager:    env.jwt,
 		Logger:        logger,
+		Tether:        &tether.Controller{ADB: env.adb, APK: "/nonexistent/gnirehtet.apk", Logger: logger},
+		VPN:           vpnSvc,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -215,6 +266,7 @@ func TestDeviceRoutesEnforcePermissionLevels(t *testing.T) {
 		{"POST", base + "/install", "", "control"},
 		// Changing Batter's record of the device.
 		{"PUT", base, `{"nickname":"n"}`, "manage"},
+		{"PUT", base + "/tether", `{"profile_id":null}`, "manage"},
 		{"DELETE", base, "", "manage"},
 	}
 	users := map[string]int{"stranger": -1, "viewer": 0, "controller": 1, "manager": 2, "admin": 99}
@@ -232,6 +284,27 @@ func TestDeviceRoutesEnforcePermissionLevels(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestDeviceAudioSocketNeedsViewPermission(t *testing.T) {
+	env := newTestEnv(t)
+	for user, wantAllowed := range map[string]bool{"stranger": false, "viewer": true, "admin": true} {
+		t.Run(user, func(t *testing.T) {
+			token, err := env.jwt.GenerateToken(env.users[user], user, env.role(t, user))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest("GET", "/ws/device/"+testSerial+"/audio?token="+token, nil)
+			w := httptest.NewRecorder()
+			env.router.ServeHTTP(w, req)
+			// Allowed callers reach the handler, which 404s without a session
+			// (unlike gin's bare 404 for an unregistered route).
+			allowed := w.Code == http.StatusNotFound && strings.Contains(w.Body.String(), "no active session")
+			if allowed != wantAllowed || (!allowed && w.Code != http.StatusForbidden) {
+				t.Fatalf("status %d body %q, want allowed=%v", w.Code, w.Body.String(), wantAllowed)
+			}
+		})
 	}
 }
 
@@ -384,4 +457,257 @@ func TestLoginRateLimitKeysOnTrustedClientIP(t *testing.T) {
 			t.Fatalf("%d of 11 attempts limited, want 0", got)
 		}
 	})
+}
+
+func TestScreenLockEndpointsNeedOperator(t *testing.T) {
+	env := newTestEnv(t)
+	routes := []struct{ method, path, body string }{
+		{"GET", "/api/v1/devices/lock/" + testSerial, ""},
+		{"POST", "/api/v1/devices/lock/" + testSerial + "/remove", `{"credential":"1234"}`},
+	}
+	for _, rt := range routes {
+		// A per-device "manage" grant isn't enough: preparing phones is an
+		// operator task, like registering them.
+		for _, user := range []string{"viewer", "manager"} {
+			if w := env.do(t, user, rt.method, rt.path, rt.body); w.Code != http.StatusForbidden {
+				t.Fatalf("%s %s as %s: status %d, want 403", rt.method, rt.path, user, w.Code)
+			}
+		}
+		// The test device isn't attached, so the operator gets an error, but
+		// not a permission error.
+		if w := env.do(t, "operator", rt.method, rt.path, rt.body); w.Code == http.StatusForbidden || w.Code == http.StatusNotFound {
+			t.Fatalf("%s %s as operator: status %d", rt.method, rt.path, w.Code)
+		}
+	}
+}
+
+// Throwaway WireGuard keys for the VPN tests.
+const (
+	vpnTestPriv = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+	vpnTestPeer = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
+)
+
+var vpnTestConfig = `[Interface]
+PrivateKey = ` + vpnTestPriv + `
+Address = 10.64.0.2/32
+DNS = 10.64.0.1
+
+[Peer]
+PublicKey = ` + vpnTestPeer + `
+Endpoint = vpn.example.net:51820
+AllowedIPs = 0.0.0.0/0
+`
+
+// createProfile creates a VPN profile as admin and returns its id.
+func (e *testEnv) createProfile(t *testing.T, name string) string {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"name": name, "config": vpnTestConfig, "enabled": true})
+	w := e.do(t, "admin", "POST", "/api/v1/vpn/profiles", string(body))
+	var p struct {
+		ID string `json:"id"`
+	}
+	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &p) != nil || p.ID == "" {
+		t.Fatalf("create profile: %d %s", w.Code, w.Body.String())
+	}
+	return p.ID
+}
+
+func (e *testEnv) deviceProfile(t *testing.T) *string {
+	t.Helper()
+	var id *string
+	if err := e.db.QueryRow(context.Background(), "SELECT vpn_profile_id::text FROM devices WHERE serial = $1", testSerial).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestTetherAssignmentNeedsManageAndPersists(t *testing.T) {
+	env := newTestEnv(t)
+	path := "/api/v1/devices/" + testSerial + "/tether"
+	profile := env.createProfile(t, "Sweden")
+	assign := `{"profile_id":"` + profile + `"}`
+
+	for _, user := range []string{"viewer", "controller"} {
+		if w := env.do(t, user, "PUT", path, assign); w.Code != http.StatusForbidden {
+			t.Fatalf("%s: status %d, want 403", user, w.Code)
+		}
+	}
+
+	// The test device isn't attached, so applying fails, but the setting is
+	// kept and applied when the device connects.
+	w := env.do(t, "manager", "PUT", path, assign)
+	if w.Code != http.StatusOK {
+		t.Fatalf("manager: status %d; body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		ProfileID  *string `json:"vpn_profile_id"`
+		ApplyError string  `json:"apply_error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.ProfileID == nil || *resp.ProfileID != profile || resp.ApplyError == "" {
+		t.Fatalf("want the profile and the apply error reported; body: %s", w.Body.String())
+	}
+	if got := env.deviceProfile(t); got == nil || *got != profile {
+		t.Fatalf("profile not stored: %v", got)
+	}
+
+	w = env.do(t, "manager", "GET", "/api/v1/devices/"+testSerial, "")
+	var dev struct {
+		ProfileID   string `json:"vpn_profile_id"`
+		ProfileName string `json:"vpn_profile_name"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &dev); err != nil || dev.ProfileID != profile || dev.ProfileName != "Sweden" {
+		t.Fatalf("GET device doesn't report its profile: %s", w.Body.String())
+	}
+
+	for name, body := range map[string]string{
+		"unknown profile": `{"profile_id":"00000000-0000-0000-0000-000000000000"}`,
+		"not a uuid":      `{"profile_id":"sweden"}`,
+		"no profile_id":   `{}`,
+	} {
+		if w := env.do(t, "manager", "PUT", path, body); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", name, w.Code)
+		}
+	}
+
+	if w := env.do(t, "manager", "PUT", path, `{"profile_id":null}`); w.Code != http.StatusOK {
+		t.Fatalf("turn off: status %d", w.Code)
+	}
+	if got := env.deviceProfile(t); got != nil {
+		t.Fatalf("profile still set after turning tethering off: %s", *got)
+	}
+	if !env.adb.called(testSerial + " shell am start -a com.genymobile.gnirehtet.STOP") {
+		t.Fatalf("turning off didn't try to stop the client: %v", env.adb.calls)
+	}
+
+	if w := env.do(t, "admin", "PUT", "/api/v1/devices/NOSUCHDEVICE/tether", assign); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown device: status %d, want 404", w.Code)
+	}
+}
+
+func TestDeletingAProfileTurnsItsPhonesOff(t *testing.T) {
+	env := newTestEnv(t)
+	profile := env.createProfile(t, "Sweden")
+	if w := env.do(t, "manager", "PUT", "/api/v1/devices/"+testSerial+"/tether", `{"profile_id":"`+profile+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("assign: %d %s", w.Code, w.Body.String())
+	}
+	env.adb.calls = nil
+
+	w := env.do(t, "admin", "DELETE", "/api/v1/vpn/profiles/"+profile, "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), testSerial) {
+		t.Fatalf("delete: %d %s (want the affected phone listed)", w.Code, w.Body.String())
+	}
+	if got := env.deviceProfile(t); got != nil {
+		t.Fatalf("phone still on the deleted profile")
+	}
+	if !env.adb.called(testSerial + " shell am start -a com.genymobile.gnirehtet.STOP") {
+		t.Fatalf("deleting the profile didn't turn the phone's tethering off: %v", env.adb.calls)
+	}
+}
+
+func TestVPNProfileRoutesAreAdminOnly(t *testing.T) {
+	env := newTestEnv(t)
+	id := env.createProfile(t, "Sweden")
+	body, _ := json.Marshal(map[string]any{"name": "Norway", "config": vpnTestConfig})
+	routes := []struct{ method, path, body string }{
+		{"GET", "/api/v1/vpn/profiles", ""},
+		{"POST", "/api/v1/vpn/profiles", string(body)},
+		{"GET", "/api/v1/vpn/profiles/" + id, ""},
+		{"PUT", "/api/v1/vpn/profiles/" + id, `{"enabled":false}`},
+		{"POST", "/api/v1/vpn/profiles/" + id + "/check", ""},
+		{"DELETE", "/api/v1/vpn/profiles/" + id, ""}, // last: removes it
+	}
+	for _, rt := range routes {
+		for _, user := range []string{"viewer", "manager", "operator"} {
+			if w := env.do(t, user, rt.method, rt.path, rt.body); w.Code != http.StatusForbidden {
+				t.Errorf("%s %s as %s: status %d, want 403", rt.method, rt.path, user, w.Code)
+			}
+		}
+		if w := env.do(t, "admin", rt.method, rt.path, rt.body); w.Code >= 400 {
+			t.Errorf("%s %s as admin: status %d; body: %s", rt.method, rt.path, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestProfileNamesAreListedForEveryone(t *testing.T) {
+	env := newTestEnv(t)
+	id := env.createProfile(t, "Sweden")
+	w := env.do(t, "viewer", "GET", "/api/v1/vpn/profile-names", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	want := `{"profiles":[{"id":"` + id + `","name":"Sweden"}]}`
+	if w.Body.String() != want {
+		t.Fatalf("body %s, want ids and names only: %s", w.Body.String(), want)
+	}
+}
+
+func TestVPNProfilesNeverReturnPrivateKey(t *testing.T) {
+	env := newTestEnv(t)
+	body, _ := json.Marshal(map[string]any{"name": "Sweden", "config": vpnTestConfig, "enabled": true})
+	w := env.do(t, "admin", "POST", "/api/v1/vpn/profiles", string(body))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var p struct {
+		ID     string `json:"id"`
+		Config struct {
+			PublicKey string `json:"public_key"`
+			Peers     []struct {
+				Endpoint string `json:"endpoint"`
+			} `json:"peers"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil || p.Config.PublicKey == "" ||
+		len(p.Config.Peers) != 1 || p.Config.Peers[0].Endpoint != "vpn.example.net:51820" {
+		t.Fatalf("create response doesn't describe the profile: %s", w.Body.String())
+	}
+	responses := []*httptest.ResponseRecorder{
+		w,
+		env.do(t, "admin", "GET", "/api/v1/vpn/profiles", ""),
+		env.do(t, "admin", "GET", "/api/v1/vpn/profiles/"+p.ID, ""),
+		env.do(t, "admin", "PUT", "/api/v1/vpn/profiles/"+p.ID, `{"name":"Sverige"}`),
+	}
+	for i, r := range responses {
+		if strings.Contains(r.Body.String(), vpnTestPriv) {
+			t.Fatalf("response %d contains the private key: %s", i, r.Body.String())
+		}
+	}
+
+	bad, _ := json.Marshal(map[string]any{"name": "Bad", "config": "[Interface]\nPostUp = echo hi\n"})
+	if w := env.do(t, "admin", "POST", "/api/v1/vpn/profiles", string(bad)); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid config: status %d, want 400", w.Code)
+	}
+	if w := env.do(t, "admin", "GET", "/api/v1/vpn/profiles/00000000-0000-0000-0000-000000000000", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown profile: status %d, want 404", w.Code)
+	}
+}
+
+// Every open dashboard polls the device list; through the real router, a
+// burst of polls must share one `adb devices` run.
+func TestDeviceListPollingSharesOneADBRun(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	fake := "#!/bin/sh\necho \"$@\" >> " + calls + "\n" +
+		"case \"$*\" in devices*) sleep 0.2; printf 'List of devices attached\\n" + testSerial + " device\\n' ;; esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "adb"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	env := newTestEnv(t)
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if w := env.do(t, "admin", "GET", "/api/v1/devices", ""); w.Code != http.StatusOK {
+				t.Errorf("status %d", w.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	b, _ := os.ReadFile(calls)
+	if n := strings.Count(string(b), "devices -l"); n != 1 {
+		t.Fatalf("%d `adb devices` runs for 20 concurrent polls, want 1", n)
+	}
 }

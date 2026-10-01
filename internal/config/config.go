@@ -30,6 +30,13 @@ type Config struct {
 	ScrcpyServerPath string
 	ScrcpyVersion    string
 
+	// Reverse tethering (gnirehtet). Disabled if the binary is missing.
+	GnirehtetPath string
+	GnirehtetAPK  string
+	// VPNExitIPURL answers with the caller's public IP (plain text); used to
+	// check where tethered traffic exits.
+	VPNExitIPURL string
+
 	// Auth
 	JWTSecret     string
 	JWTExpirySecs int
@@ -50,6 +57,9 @@ func Load() (*Config, error) {
 		DatabaseURL:      getEnv("DATABASE_URL", "postgres://batter:batter@localhost:5432/batter?sslmode=disable"),
 		ScrcpyServerPath: getEnv("SCRCPY_SERVER_PATH", "/usr/local/share/scrcpy/scrcpy-server"),
 		ScrcpyVersion:    getEnv("SCRCPY_VERSION", "3.3.4"),
+		GnirehtetPath:    getEnv("GNIREHTET_PATH", "/usr/local/bin/gnirehtet"),
+		GnirehtetAPK:     getEnv("GNIREHTET_APK", "/usr/local/share/gnirehtet/gnirehtet.apk"),
+		VPNExitIPURL:     getEnv("VPN_EXIT_IP_URL", "https://api.ipify.org"),
 		JWTSecret:        getEnv("JWT_SECRET", ""),
 		DataDir:          getEnv("DATA_DIR", "./data"),
 		JWTExpirySecs:    getEnvInt("JWT_EXPIRY_SECS", 3600),
@@ -68,6 +78,13 @@ func Load() (*Config, error) {
 	}
 
 	for _, p := range splitAndTrim(getEnv("TRUSTED_PROXIES", "")) {
+		if p == "gateway" {
+			gw, err := defaultGateway()
+			if err != nil {
+				return nil, fmt.Errorf("TRUSTED_PROXIES gateway: %w", err)
+			}
+			p = gw
+		}
 		if net.ParseIP(p) == nil {
 			if _, _, err := net.ParseCIDR(p); err != nil {
 				return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q: want an IP or CIDR", p)
@@ -111,6 +128,32 @@ func loadOrCreateSecret(path string) (string, error) {
 		return "", err
 	}
 	return secret, nil
+}
+
+// routeFile is the kernel's IPv4 routing table (overridable in tests).
+var routeFile = "/proc/net/route"
+
+// defaultGateway returns the default route's gateway. In a container that is
+// the docker bridge, which connections to the container's published ports
+// come from (via docker-proxy or NAT), so caddy on the host appears as it.
+func defaultGateway() (string, error) {
+	b, err := os.ReadFile(routeFile)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(b), "\n")[1:] {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[1] != "00000000" {
+			continue
+		}
+		gw, err := strconv.ParseUint(f[2], 16, 32)
+		if err != nil || gw == 0 {
+			continue
+		}
+		// The table stores addresses in host (little-endian) byte order.
+		return net.IPv4(byte(gw), byte(gw>>8), byte(gw>>16), byte(gw>>24)).String(), nil
+	}
+	return "", fmt.Errorf("no default route in %s", routeFile)
 }
 
 func getEnv(key, fallback string) string {

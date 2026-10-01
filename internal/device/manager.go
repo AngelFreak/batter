@@ -22,12 +22,18 @@ const (
 func TierOptions(tier SessionTier) SessionOptions {
 	switch tier {
 	case TierThumbnail:
-		return SessionOptions{MaxSize: 360, MaxFPS: 5}
-	case TierFull:
-		return SessionOptions{MaxSize: 1024, MaxFPS: 30}
+		return SessionOptions{MaxSize: 360, MaxFPS: 5, VideoBitRate: thumbnailBitRate}
 	default:
-		return SessionOptions{MaxSize: 1024, MaxFPS: 30}
+		return SessionOptions{MaxSize: 1024, MaxFPS: 30, VideoBitRate: mediumBitRate}
 	}
+}
+
+// tierFor infers a session's tier from its options.
+func tierFor(opts SessionOptions) SessionTier {
+	if opts.MaxSize > 0 && opts.MaxSize <= 360 {
+		return TierThumbnail
+	}
+	return TierFull
 }
 
 // ManagerConfig holds configuration for the device manager.
@@ -43,7 +49,10 @@ type Manager struct {
 	adb          *ADB
 	sessions     map[string]*Session
 	sessionTiers map[string]SessionTier
-	fullViewers  map[string]int // reference count of full-quality viewers per serial
+	fullViewers  map[string]int  // reference count of full-quality viewers per serial
+	noAudio      map[string]bool // devices whose scrcpy-server died from audio; lazily created
+	// sessionQuality is the level of each full-tier session (see quality.go).
+	sessionQuality map[string]Quality
 	// mu guards the maps above and is only ever held briefly. Slow ADB work
 	// (session start/stop, which can take seconds or hang) is serialized per
 	// device by deviceLocks instead, so one stuck device can't stall the rest.
@@ -101,12 +110,19 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		adb:              adb,
 		sessions:         make(map[string]*Session),
 		sessionTiers:     make(map[string]SessionTier),
+		sessionQuality:   make(map[string]Quality),
 		fullViewers:      make(map[string]int),
 		scrcpyServerPath: cfg.ScrcpyServerPath,
 		scrcpyVersion:    scrcpyVersion,
 		screenshotCache:  ssCache,
 		logger:           logger,
 	}, nil
+}
+
+// ADB returns the manager's adb client, for features (reverse tethering)
+// that drive devices outside of scrcpy sessions.
+func (m *Manager) ADB() *ADB {
+	return m.adb
 }
 
 // ListDevices returns all connected ADB devices with session status.
@@ -134,6 +150,9 @@ func (m *Manager) ListDevices(ctx context.Context) ([]DeviceInfo, error) {
 		}
 		if tier, ok := m.sessionTiers[d.Serial]; ok {
 			info.SessionTier = tier
+			if tier == TierFull {
+				info.SessionQuality = m.sessionQuality[d.Serial]
+			}
 		}
 		result = append(result, info)
 	}
@@ -167,14 +186,45 @@ func (m *Manager) detachSession(serial string) *Session {
 	s := m.sessions[serial]
 	delete(m.sessions, serial)
 	delete(m.sessionTiers, serial)
+	if s != nil {
+		m.rememberAudioFailureLocked(serial, s)
+	}
+	delete(m.sessionQuality, serial)
 	return s
 }
 
+// rememberAudioFailureLocked marks serial as video-only if its session died
+// because of audio: scrcpy-server exits on a fatal audio error right after
+// disabling the audio stream, and would do so again on every restart. The
+// caller holds m.mu.
+func (m *Manager) rememberAudioFailureLocked(serial string, s *Session) {
+	if s.IsAlive() || !s.diedFromAudio() {
+		return
+	}
+	if m.noAudio == nil {
+		m.noAudio = make(map[string]bool)
+	}
+	if !m.noAudio[serial] {
+		m.logger.Warn("scrcpy-server exited right after disabling audio; streaming video only from now on", "serial", serial)
+	}
+	m.noAudio[serial] = true
+}
+
 // killDeviceServer force-kills any lingering scrcpy-server on the device and
-// removes reverse tunnels so a new session can bind its abstract socket.
+// removes scrcpy's reverse tunnels so a new session can bind its abstract
+// socket. Other tunnels (reverse tethering) are left in place.
 func (m *Manager) killDeviceServer(ctx context.Context, serial string) {
 	_, _ = m.adb.Shell(ctx, serial, "pkill", "-9", "-f", "app_process.*scrcpy")
-	_, _ = m.adb.run(ctx, "-s", serial, "reverse", "--remove-all")
+	specs, err := m.adb.ListReverse(ctx, serial)
+	if err != nil {
+		m.logger.Debug("list reverse tunnels", "serial", serial, "error", err)
+		return
+	}
+	for spec := range specs {
+		if name, ok := strings.CutPrefix(spec, "localabstract:"); ok && strings.HasPrefix(name, "scrcpy_") {
+			_ = m.adb.RemoveReverse(ctx, serial, name)
+		}
+	}
 }
 
 // StartSession starts a scrcpy session for a device. If a dead session exists, it is replaced.
@@ -201,20 +251,24 @@ func (m *Manager) StartSession(ctx context.Context, serial string, opts SessionO
 
 // startSessionLocked starts a new session. The caller holds serial's device lock.
 func (m *Manager) startSessionLocked(serial string, opts SessionOptions) (*Session, error) {
+	m.mu.RLock()
+	opts.DisableAudio = opts.DisableAudio || m.noAudio[serial]
+	m.mu.RUnlock()
+
 	session, err := newSession(m.adb, serial, m.scrcpyServerPath, m.scrcpyVersion, opts, m.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start session for %s: %w", serial, err)
 	}
 
-	// Determine tier from options
-	tier := TierFull
-	if opts.MaxSize > 0 && opts.MaxSize <= 360 {
-		tier = TierThumbnail
-	}
+	tier := tierFor(opts)
 
 	m.mu.Lock()
 	m.sessions[serial] = session
 	m.sessionTiers[serial] = tier
+	if m.sessionQuality == nil {
+		m.sessionQuality = make(map[string]Quality)
+	}
+	m.sessionQuality[serial] = qualityFor(opts.VideoBitRate)
 	m.mu.Unlock()
 
 	m.logger.Info("session started", "serial", serial, "width", session.Width, "height", session.Height, "tier", tier)
@@ -273,26 +327,40 @@ func (m *Manager) RestartSession(ctx context.Context, serial string, opts Sessio
 	return m.startSessionLocked(serial, opts)
 }
 
-// UpgradeSession switches a device session from thumbnail to full quality.
-// Returns the new session. Increments the full-viewer reference count.
-func (m *Manager) UpgradeSession(ctx context.Context, serial string) (*Session, error) {
+// UpgradeSession switches a device session to full quality at q and counts
+// the caller as a full-quality viewer (unless rejoin: a viewer changing
+// level is already counted). A full session already at q is reused;
+// otherwise it restarts at q, for everyone watching (one shared session).
+func (m *Manager) UpgradeSession(ctx context.Context, serial string, q Quality, rejoin bool) (*Session, error) {
 	m.mu.Lock()
-	currentTier := m.sessionTiers[serial]
-	m.fullViewers[serial]++
+	currentTier, currentQuality := m.sessionTiers[serial], m.sessionQuality[serial]
+	if !rejoin {
+		m.fullViewers[serial]++
+	}
 	count := m.fullViewers[serial]
 	m.mu.Unlock()
 
-	m.logger.Info("upgrade requested", "serial", serial, "current_tier", currentTier, "full_viewers", count)
+	m.logger.Info("upgrade requested", "serial", serial, "current_tier", currentTier,
+		"current_quality", currentQuality, "quality", q, "full_viewers", count)
 
-	if currentTier == TierFull {
-		// Already full quality, just return existing session
-		s := m.GetSession(serial)
-		if s != nil {
+	if currentTier == TierFull && currentQuality == q {
+		if s := m.GetSession(serial); s != nil {
 			return s, nil
 		}
 	}
 
-	return m.RestartSession(ctx, serial, TierOptions(TierFull))
+	return m.RestartSession(ctx, serial, FullOptions(q))
+}
+
+// GetSessionQuality returns the full-quality session's level, or "" when
+// the session isn't at full quality.
+func (m *Manager) GetSessionQuality(serial string) Quality {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.sessionTiers[serial] != TierFull {
+		return ""
+	}
+	return m.sessionQuality[serial]
 }
 
 // DowngradeSession decrements the full-viewer reference count.
@@ -434,6 +502,7 @@ func (m *Manager) Shutdown() {
 	sessions := m.sessions
 	m.sessions = make(map[string]*Session)
 	m.sessionTiers = make(map[string]SessionTier)
+	m.sessionQuality = make(map[string]Quality)
 	m.fullViewers = make(map[string]int)
 	m.mu.Unlock()
 
@@ -456,7 +525,13 @@ type DeviceInfo struct {
 	Width          int         `json:"width,omitempty"`
 	Height         int         `json:"height,omitempty"`
 	SessionTier    SessionTier `json:"session_tier,omitempty"`
-	LastSeenAt     *time.Time  `json:"last_seen_at,omitempty"`
+	// SessionQuality is the full-quality session's level (shared by all
+	// viewers; the latest choice wins).
+	SessionQuality Quality    `json:"session_quality,omitempty"`
+	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
+	// VPNProfileID is set when the device is tethered, through that profile.
+	VPNProfileID   string `json:"vpn_profile_id,omitempty"`
+	VPNProfileName string `json:"vpn_profile_name,omitempty"`
 }
 
 // ValidateDevice checks whether a device is reachable via ADB and returns its state.

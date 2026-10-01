@@ -6,6 +6,8 @@ const nextConfig = {
     // would cut off large APK installs and file pushes to devices.
     proxyTimeout: 10 * 60 * 1000,
   },
+  // Behind caddy (the normal deployment) /api and /ws go straight to the
+  // backend; these rewrites serve `next dev` and direct use of port 3000.
   async rewrites() {
     return [
       {

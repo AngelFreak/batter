@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -97,5 +98,35 @@ func TestLoadPrefersJWTSecretFromEnv(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "jwt-secret")); !os.IsNotExist(err) {
 		t.Fatal("secret file written even though JWT_SECRET was set")
+	}
+}
+
+// Inside a container, "gateway" names the default gateway: connections to
+// a port docker publishes (caddy on the host -> 127.0.0.1:8080) arrive from
+// it.
+func TestTrustedProxiesGatewayResolvesDefaultGateway(t *testing.T) {
+	routes := filepath.Join(t.TempDir(), "route")
+	// /proc/net/route: gateway 172.18.0.1, little-endian hex.
+	table := "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n" +
+		"eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n" +
+		"eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+	if err := os.WriteFile(routes, []byte(table), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	routeFile = routes
+	t.Cleanup(func() { routeFile = "/proc/net/route" })
+	t.Setenv("JWT_SECRET", "x")
+	t.Setenv("TRUSTED_PROXIES", "127.0.0.1, gateway")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.TrustedProxies, ","); got != "127.0.0.1,172.18.0.1" {
+		t.Fatalf("TrustedProxies = %s, want 127.0.0.1,172.18.0.1", got)
+	}
+
+	routeFile = filepath.Join(t.TempDir(), "missing")
+	if _, err := Load(); err == nil {
+		t.Fatal("gateway with no readable route table accepted")
 	}
 }

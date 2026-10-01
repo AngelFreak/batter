@@ -2,6 +2,7 @@ package device
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -24,6 +25,31 @@ const (
 type SessionOptions struct {
 	MaxSize int `json:"max_size"` // 0 = device default
 	MaxFPS  int `json:"max_fps"`  // 0 = no limit
+	// VideoBitRate in bits/s; 0 = scrcpy's default (8 Mbps).
+	VideoBitRate int `json:"video_bit_rate"`
+	// DisableAudio forces a video-only session. Audio is otherwise captured
+	// for full-tier sessions only: capturing the "output" source silences
+	// the phone, which nobody should pay for a grid thumbnail.
+	DisableAudio bool `json:"-"`
+}
+
+func (o SessionOptions) wantsAudio() bool {
+	return !o.DisableAudio && tierFor(o) == TierFull
+}
+
+// What scrcpy-server writes in place of the audio codec ID when it disables
+// the stream (Streamer.writeDisableStream), and the codec ID for Opus.
+const (
+	audioCodecDisabled    = 0
+	audioCodecConfigError = 1
+	audioCodecOpus        = 0x6f707573 // "opus"
+)
+
+// AudioStatus says whether a session can stream audio, and if not, why.
+type AudioStatus struct {
+	Available bool   `json:"available"`
+	Codec     string `json:"codec,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // Session represents an active scrcpy connection to a device.
@@ -40,7 +66,7 @@ type Session struct {
 	videoPort   int
 
 	// Video subscribers: id -> channel
-	videoSubscribers map[string]chan []byte
+	videoSubscribers map[string]*videoSub
 	subscribersMu    sync.RWMutex
 
 	// Control ownership: only one client can send input at a time
@@ -55,6 +81,24 @@ type Session struct {
 	// Stored SPS/PPS for new subscribers
 	configPacket []byte
 	configMu     sync.RWMutex
+
+	// Audio is best effort: none of it may affect video, control or IsAlive.
+	audioConn        net.Conn
+	audioMu          sync.RWMutex // guards the audio fields below
+	audioSubscribers map[string]chan []byte
+	audioConfig      []byte        // last Opus config packet (header + OpusHead)
+	audioStatus      AudioStatus   // valid once audioReady is closed
+	audioReady       chan struct{} // closed once the device says whether audio works
+	audioEnded       bool          // stream over; no more packets will come
+	audioDisabledAt  time.Time     // when the device disabled audio, if it did
+	audioDone        chan struct{} // closed when audioReadLoop returns
+	videoEndedAt     time.Time     // written before done is closed
+
+	// Keyframe request throttling (see RequestKeyframe).
+	keyframeMu    sync.Mutex
+	keyframeEvery time.Duration // 0 = keyframeInterval
+	lastKeyframe  time.Time
+	keyframeTimer *time.Timer
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -71,7 +115,10 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 	s := &Session{
 		Serial:           serial,
 		SCID:             scid,
-		videoSubscribers: make(map[string]chan []byte),
+		videoSubscribers: make(map[string]*videoSub),
+		audioSubscribers: make(map[string]chan []byte),
+		audioReady:       make(chan struct{}),
+		audioDone:        make(chan struct{}),
 		clipboardCh:      make(chan string, 4),
 		cancel:           cancel,
 		done:             make(chan struct{}),
@@ -116,7 +163,7 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 	serverArgs := buildServerArgs(scid, scrcpyVersion, opts)
 	logger.Info("launching scrcpy-server", "args", serverArgs)
 	go func() {
-		out, err := adb.Shell(ctx, serial, serverArgs...)
+		out, err := adb.ServerShell(ctx, serial, serverArgs...)
 		if err != nil && ctx.Err() == nil {
 			logger.Error("scrcpy-server exited", "error", err, "output", string(out))
 		}
@@ -154,22 +201,47 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 		"height", s.Height,
 	)
 
-	// Step 7: Accept control connection from server
+	// Step 7: Accept the audio connection, which scrcpy-server opens between
+	// video and control. Its header comes later, once the device's encoder
+	// runs (or fails), so it is read by audioReadLoop, never waited on here.
+	if opts.wantsAudio() {
+		_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second))
+		audioConn, err := listener.Accept()
+		if err != nil {
+			cancel()
+			videoConn.Close()
+			cleanup()
+			return nil, fmt.Errorf("accept audio: %w", err)
+		}
+		s.audioConn = audioConn
+	}
+
+	// Step 8: Accept control connection from server
 	_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second))
 	controlConn, err := listener.Accept()
 	if err != nil {
 		cancel()
 		videoConn.Close()
+		if s.audioConn != nil {
+			s.audioConn.Close()
+		}
 		cleanup()
 		return nil, fmt.Errorf("accept control: %w", err)
 	}
 	s.controlConn = controlConn
 	listener.Close()
 
-	// Step 8: Start control read loop (reads clipboard messages from device)
+	// Step 9: Start control read loop (reads clipboard messages from device)
 	go s.controlReadLoop(ctx)
 
-	// Step 9: Start video read loop
+	if s.audioConn != nil {
+		go s.audioReadLoop()
+	} else {
+		s.setAudioStatus(AudioStatus{Reason: "audio is off for this session"})
+		close(s.audioDone)
+	}
+
+	// Step 10: Start video read loop
 	go s.videoReadLoop(ctx, adb, serial, abstractName)
 
 	return s, nil
@@ -179,13 +251,19 @@ func buildServerArgs(scid uint32, version string, opts SessionOptions) []string 
 	args := []string{
 		"CLASSPATH=/data/local/tmp/scrcpy-server.jar",
 		"app_process", "/", "com.genymobile.scrcpy.Server", version,
-		"audio=false",
 		"control=true",
 		"video_codec=h264",
 		"send_frame_meta=true",
 		"stay_awake=true",
 		"power_on=true",
 		fmt.Sprintf("scid=%08x", scid),
+	}
+	if opts.wantsAudio() {
+		// "output" captures what the phone plays and mutes its speaker;
+		// audio_dup (keep playing on the phone) is deliberately not set.
+		args = append(args, "audio=true", "audio_codec=opus", "audio_source=output")
+	} else {
+		args = append(args, "audio=false")
 	}
 	maxSize := opts.MaxSize
 	if maxSize <= 0 {
@@ -198,6 +276,9 @@ func buildServerArgs(scid uint32, version string, opts SessionOptions) []string 
 		maxFPS = 30
 	}
 	args = append(args, fmt.Sprintf("max_fps=%d", maxFPS))
+	if opts.VideoBitRate > 0 {
+		args = append(args, fmt.Sprintf("video_bit_rate=%d", opts.VideoBitRate))
+	}
 	return args
 }
 
@@ -205,6 +286,7 @@ func buildServerArgs(scid uint32, version string, opts SessionOptions) []string 
 func (s *Session) videoReadLoop(ctx context.Context, adb *ADB, serial string, abstractName string) {
 	defer func() {
 		_ = adb.RemoveReverse(context.Background(), serial, abstractName)
+		s.videoEndedAt = time.Now()
 		close(s.done)
 	}()
 
@@ -263,29 +345,19 @@ func (s *Session) videoReadLoop(ctx context.Context, adb *ADB, serial string, ab
 		copy(msg, headerBuf)
 		copy(msg[12:], naluData)
 
-		// Broadcast to all subscribers
-		s.subscribersMu.RLock()
-		for _, ch := range s.videoSubscribers {
-			select {
-			case ch <- msg:
-			default:
-				// Drop frame if subscriber is slow
-			}
-		}
-		s.subscribersMu.RUnlock()
+		s.broadcast(msg)
 	}
 }
 
 // SubscribeVideo creates a new video subscription. Returns a channel that receives
 // raw video packets (12-byte header + H.264 NALU data).
-func (s *Session) SubscribeVideo(id string) chan []byte {
-	ch := make(chan []byte, 60) // buffer ~1 second at 60fps
-
+// A viewer that falls behind skips to the next keyframe (see videosub.go).
+func (s *Session) SubscribeVideo(id string) <-chan []byte {
+	sub := newVideoSub()
 	s.subscribersMu.Lock()
-	s.videoSubscribers[id] = ch
+	s.videoSubscribers[id] = sub
 	s.subscribersMu.Unlock()
-
-	return ch
+	return sub.ch
 }
 
 // GetConfigPacket returns the stored SPS/PPS config packet, if available.
@@ -303,11 +375,18 @@ func (s *Session) GetConfigPacket() []byte {
 // UnsubscribeVideo removes a video subscription.
 func (s *Session) UnsubscribeVideo(id string) {
 	s.subscribersMu.Lock()
-	if ch, ok := s.videoSubscribers[id]; ok {
-		close(ch)
+	if sub, ok := s.videoSubscribers[id]; ok {
+		close(sub.ch)
 		delete(s.videoSubscribers, id)
 	}
 	s.subscribersMu.Unlock()
+}
+
+// VideoSubscribers returns how many viewers are subscribed to the video.
+func (s *Session) VideoSubscribers() int {
+	s.subscribersMu.RLock()
+	defer s.subscribersMu.RUnlock()
+	return len(s.videoSubscribers)
 }
 
 // ClaimControl claims control for a client (last-writer-wins).
@@ -330,6 +409,46 @@ func (s *Session) ReleaseControl(id string) {
 // WriteControl sends a binary control message to the device. It is safe to
 // call from multiple goroutines: writes are serialized so scrcpy's binary
 // control protocol is never interleaved.
+// RequestKeyframe makes the device send a new config packet and keyframe.
+// scrcpy only sends frames when the screen changes, so a viewer joining an
+// existing session would otherwise see nothing until something moves.
+//
+// Each request restarts the encoder, so they are throttled to one per
+// keyframeInterval: the first is sent at once, and any made during the
+// interval are served by a single reset at its end. That one is sent after
+// they joined, so none of them can miss its keyframe.
+func (s *Session) RequestKeyframe() error {
+	s.keyframeMu.Lock()
+	defer s.keyframeMu.Unlock()
+	if s.keyframeTimer != nil {
+		return nil // a trailing reset is already due
+	}
+	every := cmp.Or(s.keyframeEvery, keyframeInterval)
+	if wait := every - time.Since(s.lastKeyframe); wait > 0 {
+		s.keyframeTimer = time.AfterFunc(wait, func() {
+			s.keyframeMu.Lock()
+			defer s.keyframeMu.Unlock()
+			s.keyframeTimer = nil
+			if err := s.sendKeyframeLocked(); err != nil {
+				s.logger.Debug("deferred keyframe request failed", "error", err)
+			}
+		})
+		return nil
+	}
+	return s.sendKeyframeLocked()
+}
+
+// keyframeInterval is the minimum gap between encoder resets.
+const keyframeInterval = 2 * time.Second
+
+func (s *Session) sendKeyframeLocked() error {
+	if err := s.WriteControl(EncodeResetVideo()); err != nil {
+		return err
+	}
+	s.lastKeyframe = time.Now()
+	return nil
+}
+
 func (s *Session) WriteControl(data []byte) error {
 	if s.controlConn == nil {
 		return fmt.Errorf("control connection not established")
@@ -360,11 +479,15 @@ func (s *Session) Close() {
 	if s.controlConn != nil {
 		s.controlConn.Close()
 	}
+	if s.audioConn != nil {
+		s.audioConn.Close()
+	}
+	s.endAudio()
 
 	// Close all subscriber channels
 	s.subscribersMu.Lock()
-	for id, ch := range s.videoSubscribers {
-		close(ch)
+	for id, sub := range s.videoSubscribers {
+		close(sub.ch)
 		delete(s.videoSubscribers, id)
 	}
 	s.subscribersMu.Unlock()
@@ -374,6 +497,11 @@ func (s *Session) Close() {
 	case <-s.done:
 	case <-time.After(5 * time.Second):
 		s.logger.Warn("timeout waiting for video loop to finish")
+	}
+	select {
+	case <-s.audioDone:
+	case <-time.After(5 * time.Second):
+		s.logger.Warn("timeout waiting for audio loop to finish")
 	}
 }
 

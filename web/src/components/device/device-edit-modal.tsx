@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { updateDevice, deleteDevice, DeviceInfo } from '@/lib/api';
+import { useEffect, useState } from 'react';
+import { updateDevice, deleteDevice, setTether, listVPNProfileNames, DeviceInfo, VPNProfileName } from '@/lib/api';
 
 interface DeviceEditModalProps {
   device: DeviceInfo | null;
@@ -15,8 +15,34 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [profileId, setProfileId] = useState(device?.vpn_profile_id ?? '');
+  const [profiles, setProfiles] = useState<VPNProfileName[] | null>(null);
+  const [tetherBusy, setTetherBusy] = useState(false);
+  const [tetherNote, setTetherNote] = useState('');
+
+  useEffect(() => {
+    listVPNProfileNames()
+      .then(setProfiles)
+      .catch(() => setProfiles([]));
+  }, []);
 
   if (!device) return null;
+
+  const handleTether = async (id: string) => {
+    setTetherBusy(true);
+    setTetherNote('');
+    try {
+      const res = await setTether(device.serial, id || null);
+      setProfileId(res.vpn_profile_id ?? '');
+      if (res.apply_error) {
+        setTetherNote(`Saved; will apply when the device is connected (${res.apply_error})`);
+      }
+    } catch (err) {
+      setTetherNote(err instanceof Error ? err.message : 'Failed to change internet sharing');
+    } finally {
+      setTetherBusy(false);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -94,6 +120,32 @@ export function DeviceEditModal({ device, onClose, onSaved, onDeleted }: DeviceE
               placeholder="e.g. Test Phone 1"
               className="w-full px-3 py-2 text-xs bg-gray-800 border border-gray-700 rounded-lg text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-500"
             />
+          </div>
+
+          <div>
+            <label htmlFor="internet-sharing" className="block text-xs text-gray-400 mb-1.5">
+              Internet sharing
+            </label>
+            <select
+              id="internet-sharing"
+              value={profileId}
+              onChange={(e) => handleTether(e.target.value)}
+              disabled={tetherBusy || profiles === null || (profiles.length === 0 && !profileId)}
+              className="w-full px-3 py-2 text-xs bg-gray-800 border border-gray-700 rounded-lg text-gray-200 focus:outline-none focus:border-brand-500 disabled:opacity-50"
+            >
+              <option value="">Off</option>
+              {profiles?.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[10px] text-gray-500">
+              {profiles !== null && profiles.length === 0
+                ? 'No VPN profiles yet. Ask an admin to add one to share this server\'s internet with the phone.'
+                : 'The phone uses this server\'s internet over USB, through the chosen VPN. The first time, the phone asks for VPN permission: accept it in the live view.'}
+            </p>
+            {tetherNote && <p className="mt-1 text-[10px] text-yellow-400">{tetherNote}</p>}
           </div>
 
           {/* Delete section */}
