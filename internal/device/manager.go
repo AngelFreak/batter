@@ -40,11 +40,16 @@ type ManagerConfig struct {
 
 // Manager manages ADB devices and scrcpy sessions.
 type Manager struct {
-	adb              *ADB
-	sessions         map[string]*Session
-	sessionTiers     map[string]SessionTier
-	fullViewers      map[string]int // reference count of full-quality viewers per serial
+	adb          *ADB
+	sessions     map[string]*Session
+	sessionTiers map[string]SessionTier
+	fullViewers  map[string]int // reference count of full-quality viewers per serial
+	// mu guards the maps above and is only ever held briefly. Slow ADB work
+	// (session start/stop, which can take seconds or hang) is serialized per
+	// device by deviceLocks instead, so one stuck device can't stall the rest.
 	mu               sync.RWMutex
+	deviceLocksMu    sync.Mutex
+	deviceLocks      map[string]*sync.Mutex
 	scrcpyServerPath string
 	scrcpyVersion    string
 	screenshotCache  *ScreenshotCache
@@ -135,42 +140,82 @@ func (m *Manager) ListDevices(ctx context.Context) ([]DeviceInfo, error) {
 	return result, nil
 }
 
-// StartSession starts a scrcpy session for a device. If a dead session exists, it is replaced.
-func (m *Manager) StartSession(ctx context.Context, serial string, opts SessionOptions) (*Session, error) {
+// lockDevice serializes session lifecycle operations on one device and
+// returns the unlock function. Locks are never freed; there is one per
+// device serial ever seen, which is bounded by the fleet.
+func (m *Manager) lockDevice(serial string) func() {
+	m.deviceLocksMu.Lock()
+	if m.deviceLocks == nil {
+		m.deviceLocks = make(map[string]*sync.Mutex)
+	}
+	l, ok := m.deviceLocks[serial]
+	if !ok {
+		l = &sync.Mutex{}
+		m.deviceLocks[serial] = l
+	}
+	m.deviceLocksMu.Unlock()
+
+	l.Lock()
+	return l.Unlock
+}
+
+// detachSession removes serial's session from the maps and returns it (nil
+// if none). The caller closes it outside m.mu, since Close can block.
+func (m *Manager) detachSession(serial string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	s := m.sessions[serial]
+	delete(m.sessions, serial)
+	delete(m.sessionTiers, serial)
+	return s
+}
+
+// killDeviceServer force-kills any lingering scrcpy-server on the device and
+// removes reverse tunnels so a new session can bind its abstract socket.
+func (m *Manager) killDeviceServer(ctx context.Context, serial string) {
+	_, _ = m.adb.Shell(ctx, serial, "pkill", "-9", "-f", "app_process.*scrcpy")
+	_, _ = m.adb.run(ctx, "-s", serial, "reverse", "--remove-all")
+}
+
+// StartSession starts a scrcpy session for a device. If a dead session exists, it is replaced.
+func (m *Manager) StartSession(ctx context.Context, serial string, opts SessionOptions) (*Session, error) {
+	defer m.lockDevice(serial)()
 
 	// If session exists and is alive, return it
-	if s, ok := m.sessions[serial]; ok {
+	if s := m.GetSession(serial); s != nil {
 		if s.IsAlive() {
 			return s, nil
 		}
 		// Dead session — clean up before starting a new one
 		m.logger.Info("replacing dead session", "serial", serial)
-		s.Close()
-		delete(m.sessions, serial)
-
-		// Kill any lingering scrcpy-server process on the device and wait for cleanup
-		_, _ = m.adb.Shell(ctx, serial, "pkill", "-9", "-f", "app_process.*scrcpy")
-		// Remove all reverse tunnels to free abstract sockets
-		_, _ = m.adb.run(ctx, "-s", serial, "reverse", "--remove-all")
+		if s := m.detachSession(serial); s != nil {
+			s.Close()
+		}
+		m.killDeviceServer(ctx, serial)
 		// Brief delay for the device to fully release the process
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	return m.startSessionLocked(serial, opts)
+}
+
+// startSessionLocked starts a new session. The caller holds serial's device lock.
+func (m *Manager) startSessionLocked(serial string, opts SessionOptions) (*Session, error) {
 	session, err := newSession(m.adb, serial, m.scrcpyServerPath, m.scrcpyVersion, opts, m.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start session for %s: %w", serial, err)
 	}
-
-	m.sessions[serial] = session
 
 	// Determine tier from options
 	tier := TierFull
 	if opts.MaxSize > 0 && opts.MaxSize <= 360 {
 		tier = TierThumbnail
 	}
+
+	m.mu.Lock()
+	m.sessions[serial] = session
 	m.sessionTiers[serial] = tier
+	m.mu.Unlock()
 
 	m.logger.Info("session started", "serial", serial, "width", session.Width, "height", session.Height, "tier", tier)
 	return session, nil
@@ -178,11 +223,9 @@ func (m *Manager) StartSession(ctx context.Context, serial string, opts SessionO
 
 // StopSession stops a running scrcpy session.
 func (m *Manager) StopSession(serial string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.lockDevice(serial)()
 
-	s, ok := m.sessions[serial]
-	if !ok {
+	if m.GetSession(serial) == nil {
 		return fmt.Errorf("no session for device %s", serial)
 	}
 
@@ -201,16 +244,17 @@ func (m *Manager) StopSession(serial string) error {
 		}()
 	}
 
-	s.Close()
-	delete(m.sessions, serial)
-	delete(m.sessionTiers, serial)
+	s := m.detachSession(serial)
+	m.mu.Lock()
 	delete(m.fullViewers, serial)
+	m.mu.Unlock()
+	if s != nil {
+		s.Close()
+	}
 
-	// Force-kill any lingering scrcpy process and clean up reverse tunnels
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, _ = m.adb.Shell(ctx, serial, "pkill", "-9", "-f", "app_process.*scrcpy")
-	_, _ = m.adb.run(ctx, "-s", serial, "reverse", "--remove-all")
+	m.killDeviceServer(ctx, serial)
 
 	m.logger.Info("session stopped", "serial", serial)
 	return nil
@@ -218,21 +262,15 @@ func (m *Manager) StopSession(serial string) error {
 
 // RestartSession stops any existing session and starts a fresh one.
 func (m *Manager) RestartSession(ctx context.Context, serial string, opts SessionOptions) (*Session, error) {
-	m.mu.Lock()
+	defer m.lockDevice(serial)()
 
-	if s, ok := m.sessions[serial]; ok {
+	if s := m.detachSession(serial); s != nil {
 		s.Close()
-		delete(m.sessions, serial)
-		delete(m.sessionTiers, serial)
 	}
-
-	// Kill any lingering scrcpy-server and clean up reverse tunnels
-	_, _ = m.adb.Shell(ctx, serial, "pkill", "-9", "-f", "app_process.*scrcpy")
-	_, _ = m.adb.run(ctx, "-s", serial, "reverse", "--remove-all")
+	m.killDeviceServer(ctx, serial)
 	time.Sleep(500 * time.Millisecond)
-	m.mu.Unlock()
 
-	return m.StartSession(ctx, serial, opts)
+	return m.startSessionLocked(serial, opts)
 }
 
 // UpgradeSession switches a device session from thumbnail to full quality.
@@ -393,15 +431,16 @@ func (m *Manager) ScreenshotCache() *ScreenshotCache {
 // Shutdown stops all sessions.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for serial, s := range m.sessions {
-		s.Close()
-		m.logger.Info("session closed during shutdown", "serial", serial)
-	}
+	sessions := m.sessions
 	m.sessions = make(map[string]*Session)
 	m.sessionTiers = make(map[string]SessionTier)
 	m.fullViewers = make(map[string]int)
+	m.mu.Unlock()
+
+	for serial, s := range sessions {
+		s.Close()
+		m.logger.Info("session closed during shutdown", "serial", serial)
+	}
 }
 
 // DeviceInfo extends ADBDevice with session and registration status.
