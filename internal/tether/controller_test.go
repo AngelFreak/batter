@@ -22,11 +22,21 @@ func (f *fakeADB) record(format string, args ...any) {
 
 func (f *fakeADB) Shell(_ context.Context, serial string, args ...string) ([]byte, error) {
 	f.record("%s shell %s", serial, strings.Join(args, " "))
+	// Behaves like a real device (verified on a Samsung, Android 16):
+	// `pm path` exits non-zero for a missing package; `pm list packages
+	// <filter>` exits 0 and lists every package whose name contains filter.
 	if len(args) >= 2 && args[0] == "pm" && args[1] == "path" {
 		if f.installed {
 			return []byte("package:/data/app/gnirehtet/base.apk\n"), nil
 		}
-		return nil, nil
+		return nil, fmt.Errorf("adb shell pm path: exit status 1")
+	}
+	if len(args) >= 3 && args[0] == "pm" && args[1] == "list" && args[2] == "packages" {
+		out := "package:com.genymobile.gnirehtet.helper\n" // similar name: must not count
+		if f.installed {
+			out += "package:com.genymobile.gnirehtet\n"
+		}
+		return []byte(out), nil
 	}
 	return nil, nil
 }
@@ -78,7 +88,7 @@ func TestEnableInstallsAppWhenMissingThenTunnelsAndStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"S1 shell pm path com.genymobile.gnirehtet",
+		"S1 shell pm list packages com.genymobile.gnirehtet",
 		"S1 install /apk/gnirehtet.apk",
 		"S1 reverse --list",
 		"S1 reverse localabstract:gnirehtet tcp:31417",

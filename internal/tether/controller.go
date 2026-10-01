@@ -58,11 +58,13 @@ func (c *Controller) Enable(ctx context.Context, serial string, t Target) error 
 }
 
 func (c *Controller) enable(ctx context.Context, serial string, t Target) error {
-	out, err := c.ADB.Shell(ctx, serial, "pm", "path", appPackage)
+	// Not `pm path`: it exits non-zero when the package is missing, which
+	// is indistinguishable from adb failing.
+	out, err := c.ADB.Shell(ctx, serial, "pm", "list", "packages", appPackage)
 	if err != nil {
 		return fmt.Errorf("check gnirehtet app: %w", err)
 	}
-	if !strings.Contains(string(out), "package:") {
+	if !hasPackage(string(out), appPackage) {
 		res, err := c.ADB.Install(ctx, serial, c.APK)
 		if err != nil {
 			return fmt.Errorf("install gnirehtet app: %w", err)
@@ -173,4 +175,15 @@ func (c *Controller) Watch(ctx context.Context, interval time.Duration, state fu
 		case <-ticker.C:
 		}
 	}
+}
+
+// hasPackage reports whether `pm list packages` output lists exactly pkg (the
+// filter also matches packages that merely contain the name).
+func hasPackage(out, pkg string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "package:"+pkg {
+			return true
+		}
+	}
+	return false
 }
