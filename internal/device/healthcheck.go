@@ -38,6 +38,7 @@ func (m *Manager) cleanupDeadSessions() {
 	for serial, session := range m.sessions {
 		if !session.IsAlive() {
 			m.logger.Warn("cleaning up dead session", "serial", serial)
+			m.rememberAudioFailureLocked(serial, session)
 			dead = append(dead, session)
 			delete(m.sessions, serial)
 			delete(m.sessionTiers, serial)

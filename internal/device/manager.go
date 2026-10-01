@@ -30,6 +30,14 @@ func TierOptions(tier SessionTier) SessionOptions {
 	}
 }
 
+// tierFor infers a session's tier from its options.
+func tierFor(opts SessionOptions) SessionTier {
+	if opts.MaxSize > 0 && opts.MaxSize <= 360 {
+		return TierThumbnail
+	}
+	return TierFull
+}
+
 // ManagerConfig holds configuration for the device manager.
 type ManagerConfig struct {
 	ScrcpyServerPath   string
@@ -43,7 +51,8 @@ type Manager struct {
 	adb          *ADB
 	sessions     map[string]*Session
 	sessionTiers map[string]SessionTier
-	fullViewers  map[string]int // reference count of full-quality viewers per serial
+	fullViewers  map[string]int  // reference count of full-quality viewers per serial
+	noAudio      map[string]bool // devices whose scrcpy-server died from audio; lazily created
 	// mu guards the maps above and is only ever held briefly. Slow ADB work
 	// (session start/stop, which can take seconds or hang) is serialized per
 	// device by deviceLocks instead, so one stuck device can't stall the rest.
@@ -173,7 +182,27 @@ func (m *Manager) detachSession(serial string) *Session {
 	s := m.sessions[serial]
 	delete(m.sessions, serial)
 	delete(m.sessionTiers, serial)
+	if s != nil {
+		m.rememberAudioFailureLocked(serial, s)
+	}
 	return s
+}
+
+// rememberAudioFailureLocked marks serial as video-only if its session died
+// because of audio: scrcpy-server exits on a fatal audio error right after
+// disabling the audio stream, and would do so again on every restart. The
+// caller holds m.mu.
+func (m *Manager) rememberAudioFailureLocked(serial string, s *Session) {
+	if s.IsAlive() || !s.diedFromAudio() {
+		return
+	}
+	if m.noAudio == nil {
+		m.noAudio = make(map[string]bool)
+	}
+	if !m.noAudio[serial] {
+		m.logger.Warn("scrcpy-server exited right after disabling audio; streaming video only from now on", "serial", serial)
+	}
+	m.noAudio[serial] = true
 }
 
 // killDeviceServer force-kills any lingering scrcpy-server on the device and
@@ -217,16 +246,16 @@ func (m *Manager) StartSession(ctx context.Context, serial string, opts SessionO
 
 // startSessionLocked starts a new session. The caller holds serial's device lock.
 func (m *Manager) startSessionLocked(serial string, opts SessionOptions) (*Session, error) {
+	m.mu.RLock()
+	opts.DisableAudio = opts.DisableAudio || m.noAudio[serial]
+	m.mu.RUnlock()
+
 	session, err := newSession(m.adb, serial, m.scrcpyServerPath, m.scrcpyVersion, opts, m.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start session for %s: %w", serial, err)
 	}
 
-	// Determine tier from options
-	tier := TierFull
-	if opts.MaxSize > 0 && opts.MaxSize <= 360 {
-		tier = TierThumbnail
-	}
+	tier := tierFor(opts)
 
 	m.mu.Lock()
 	m.sessions[serial] = session
