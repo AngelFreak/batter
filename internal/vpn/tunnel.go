@@ -75,6 +75,35 @@ type PeerStatus struct {
 	TxBytes         int64      `json:"tx_bytes"`
 }
 
+// relayFirewall is the nftables ruleset confining every relay uid (all
+// slots) to WireGuard interfaces. Policy routing alone isn't enough: the
+// kernel's local table is consulted before the uid rules, so a relay uid
+// could reach the container's own addresses (Batter's backend and web
+// app, 127.0.0.0/8) without any tunnel. Replies on connections made to a
+// relay (adb's connection into its port) stay allowed. The table is
+// replaced in one transaction, so re-applying never opens a window.
+func relayFirewall() string {
+	uids := fmt.Sprintf("%d-%d", Slot(0).UID(), Slot(MaxProfiles-1).UID())
+	return "table inet batter_relay {}\n" +
+		"delete table inet batter_relay\n" +
+		"table inet batter_relay {\n" +
+		"\tchain output {\n" +
+		"\t\ttype filter hook output priority 0; policy accept;\n" +
+		"\t\tmeta skuid " + uids + " ct state established,related accept\n" +
+		"\t\tmeta skuid " + uids + " oifname \"wg*\" accept\n" +
+		"\t\tmeta skuid " + uids + " reject\n" +
+		"\t}\n" +
+		"}\n"
+}
+
+// installFirewall (re)loads relayFirewall. Without it a relay must not run.
+func (t *tunnels) installFirewall(ctx context.Context) error {
+	if _, err := t.cmd(ctx, relayFirewall(), "nft", "-f", "/dev/stdin"); err != nil {
+		return fmt.Errorf("%w: relay firewall: %v", ErrKillSwitch, err)
+	}
+	return nil
+}
+
 // tunnels drives the system's tunnels and policy routing, one set per slot.
 type tunnels struct {
 	run    RunFunc

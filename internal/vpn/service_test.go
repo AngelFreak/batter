@@ -560,3 +560,51 @@ func TestCheckExitRunsAsTheProfilesUID(t *testing.T) {
 		t.Fatalf("CheckExit = %q, %v as uid %d; want the Denmark relay's uid 31417", ip, err, asUID)
 	}
 }
+
+// Routing alone lets a relay uid reach the container's own addresses (the
+// local table wins over the uid rule), so a firewall also confines every
+// relay uid to wg* interfaces, except replies on connections made to it.
+func TestRelayFirewallRules(t *testing.T) {
+	rules := relayFirewall()
+	for _, want := range []string{
+		"table inet batter_relay",
+		"type filter hook output priority 0; policy accept;",
+		"meta skuid 31416-31447 ct state established,related accept",
+		`meta skuid 31416-31447 oifname "wg*" accept`,
+		"meta skuid 31416-31447 reject",
+	} {
+		if !strings.Contains(rules, want) {
+			t.Errorf("rules lack %q:\n%s", want, rules)
+		}
+	}
+	// Replaced atomically in one nft transaction: no window while re-applying.
+	if !strings.HasPrefix(rules, "table inet batter_relay {}\ndelete table inet batter_relay\n") {
+		t.Errorf("rules don't replace the table atomically:\n%s", rules)
+	}
+}
+
+func TestFirewallGoesInBeforeRelay(t *testing.T) {
+	sys := &fakeSystem{}
+	s := newService(t, testDB(t, ""), sys)
+	if _, err := s.Create(context.Background(), "Sweden", sample, true); err != nil {
+		t.Fatal(err)
+	}
+	if sys.index(t, "nft -f /dev/stdin") > sys.index(t, "relay start") {
+		t.Fatal("relay started before the firewall")
+	}
+	if got := sys.stdin["nft -f /dev/stdin"]; got != relayFirewall() {
+		t.Fatalf("nft fed %q", got)
+	}
+}
+
+func TestFirewallFailureKeepsRelayOff(t *testing.T) {
+	sys := &fakeSystem{fail: "nft"}
+	s := newService(t, testDB(t, ""), sys)
+	p, err := s.Create(context.Background(), "Sweden", sample, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.ApplyError, ErrKillSwitch.Error()) || sys.has("relay start") {
+		t.Fatalf("relay ran without the firewall (apply error %q)", p.ApplyError)
+	}
+}

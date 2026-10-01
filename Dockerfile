@@ -44,7 +44,7 @@ RUN wget -q -O /g.zip "https://github.com/Genymobile/gnirehtet/releases/download
 # Stage 5: Production image
 FROM alpine:3.20
 # iproute2 + wg: WireGuard tunnel and policy routing for tethered devices.
-RUN apk add --no-cache ca-certificates android-tools nodejs iproute2 wireguard-tools-wg
+RUN apk add --no-cache ca-certificates android-tools nodejs iproute2 wireguard-tools-wg nftables
 
 WORKDIR /app
 

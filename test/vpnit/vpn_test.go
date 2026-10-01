@@ -6,6 +6,9 @@
 //   - each profile's relay runs as its own uid on its own port, and that
 //     uid's traffic exits through that profile's server; other traffic
 //     (root, other uids) stays direct;
+//   - relay uids can't reach anything local to the container (Batter's
+//     backend and web app, loopback) or, without a tunnel, anything at all;
+//     replies on connections made to a relay still flow;
 //   - the kill switch: a profile whose tunnel is down, that is disabled, or
 //     whose server is gone gets no route out at all rather than leaking
 //     directly, and other profiles are unaffected;
@@ -94,9 +97,13 @@ func TestTetheringVPNProfiles(t *testing.T) {
 		}
 		return compose(time.Minute, append(append(a, "batter"), args...)...)
 	}
+	var echoIP string // set once the stack is up
 	// exitIP makes the same request tethered traffic would, as uid user.
 	exitIP := func(user string) (string, error) {
-		out, err := inBatter(user, "/app/batter", "vpn-exit-ip", echoURL)
+		// Relay uids can't use Docker's DNS (it's local to the container),
+		// so connect to the echo server by address, as Batter's own check
+		// does after resolving.
+		out, err := inBatter(user, "/app/batter", "vpn-exit-ip", echoURL, "--connect", echoIP)
 		return strings.TrimSpace(out), err
 	}
 	mustExit := func(t *testing.T, user, want, what string) {
@@ -159,6 +166,32 @@ func TestTetheringVPNProfiles(t *testing.T) {
 		}
 	}
 
+	// tcpOK reports whether user can open a TCP connection to host:port.
+	tcpOK := func(user, host string, port int) bool {
+		_, err := inBatter(user, "node", "-e",
+			`const s=require("net").connect(+process.argv[2],process.argv[1]);`+
+				`s.setTimeout(3000,()=>process.exit(2));s.on("connect",()=>process.exit(0));s.on("error",()=>process.exit(1))`,
+			host, fmt.Sprint(port))
+		return err == nil
+	}
+	// mustBeConfined checks a relay uid reaches nothing local to the
+	// container (no tunnel goes there), while root still does.
+	mustBeConfined := func(t *testing.T, uid, batterIP string) {
+		t.Helper()
+		for _, dst := range []struct {
+			host string
+			port int
+		}{{batterIP, 8080}, {batterIP, 3000}, {"127.0.0.1", 8080}, {"127.0.0.1", 3000}} {
+			if tcpOK(uid, dst.host, dst.port) {
+				t.Errorf("relay uid %s reached %s:%d without a tunnel", uid, dst.host, dst.port)
+			}
+		}
+		if !tcpOK("root", batterIP, 8080) || !tcpOK("root", "127.0.0.1", 8080) {
+			t.Error("non-relay traffic to the backend broken")
+		}
+	}
+
+	echoIP = containerIP(t, compose, "echo")
 	ipA := containerIP(t, compose, "wgserver-a")
 	ipB := containerIP(t, compose, "wgserver-b")
 	batterIP := containerIP(t, compose, "batter")
@@ -219,6 +252,28 @@ func TestTetheringVPNProfiles(t *testing.T) {
 		}
 	})
 
+	t.Run("relay uids can't reach the container's own services", func(t *testing.T) {
+		mustBeConfined(t, uidA, batterIP)
+		mustBeConfined(t, uidB, batterIP)
+		mustExit(t, uidA, ipA, "profile A")
+		// adb -> relay: connections into a relay's port still work, and the
+		// relay uid's replies on them flow.
+		if !tcpOK("root", "127.0.0.1", 31416) {
+			t.Error("relay port 31416 unreachable for adb")
+		}
+		if out, err := compose(time.Minute, "exec", "-d", "-T", "-u", uidA, "batter", "node", "-e",
+			`require("net").createServer(s=>s.pipe(s)).listen(31500,"127.0.0.1")`); err != nil {
+			t.Fatalf("start echo server as %s: %v %s", uidA, err, out)
+		}
+		time.Sleep(time.Second)
+		out, err := inBatter("root", "node", "-e",
+			`const s=require("net").connect(31500,"127.0.0.1",()=>s.write("ping"));`+
+				`s.setTimeout(3000,()=>process.exit(2));s.on("data",d=>{process.stdout.write(d);process.exit(0)});s.on("error",()=>process.exit(1))`)
+		if err != nil || strings.TrimSpace(out) != "ping" {
+			t.Fatalf("relay uid's replies to an incoming connection blocked: %q %v", out, err)
+		}
+	})
+
 	t.Run("kill switch: A's tunnel down blocks only A", func(t *testing.T) {
 		if out, err := inBatter("", "ip", "link", "set", "wg0", "down"); err != nil {
 			t.Fatalf("%v: %s", err, out)
@@ -235,6 +290,19 @@ func TestTetheringVPNProfiles(t *testing.T) {
 		api.updateProfile(t, profileA, map[string]any{"enabled": false})
 		waitRelays(t, uidB)
 		mustBeBlocked(t, uidA, "A disabled")
+		// With no tunnel the relay uid reaches nothing at all: not the
+		// container, not postgres, not the host, not the "internet".
+		pg := containerIP(t, compose, "postgres")
+		gw := strings.TrimSpace(run(t, time.Minute, "docker", "network", "inspect", "-f",
+			"{{(index .IPAM.Config 0).Gateway}}", project+"_default"))
+		for _, dst := range []struct {
+			host string
+			port int
+		}{{batterIP, 8080}, {"127.0.0.1", 8080}, {pg, 5432}, {gw, 80}, {containerIP(t, compose, "echo"), 80}} {
+			if tcpOK(uidA, dst.host, dst.port) {
+				t.Errorf("disabled profile's uid reached %s:%d", dst.host, dst.port)
+			}
+		}
 		if p := api.updateProfile(t, profileA, map[string]any{"enabled": true}); p.ApplyError != "" {
 			t.Fatalf("apply error: %s", p.ApplyError)
 		}
@@ -277,7 +345,9 @@ func TestTetheringVPNProfiles(t *testing.T) {
 		// Wipe A's tunnel and routing so only Batter's startup can bring them
 		// back, whether or not the restart keeps the netns.
 		wipe(t, uidA, "wg0", "51820")
-		mustExit(t, uidA, batterIP, "wiped")
+		// Even with its routing gone, the firewall keeps the relay uid off
+		// the direct route.
+		mustBeBlocked(t, uidA, "its routing wiped")
 		// The old config is B's (no profile uses B's keys any more).
 		if out, err := compose(2*time.Minute, "start", "wgserver-b"); err != nil {
 			t.Fatalf("start wgserver-b: %v\n%s", err, out)
@@ -297,6 +367,8 @@ func TestTetheringVPNProfiles(t *testing.T) {
 		if out, err := inBatter("", "test", "-e", "/app/data/wireguard.json"); err == nil {
 			t.Fatalf("legacy config not removed after import: %s", out)
 		}
+		mustBeConfined(t, uidA, batterIP)
+		mustBeConfined(t, uidB, batterIP)
 		_, names := api.do(t, "GET", "/api/v1/vpn/profile-names", nil)
 		if !strings.Contains(names, `"name":"Default"`) || !strings.Contains(names, `"name":"A"`) {
 			t.Fatalf("profiles after restart: %s", names)

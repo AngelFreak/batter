@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
+	neturl "net/url"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -20,11 +22,26 @@ const ExitIPSubcommand = "vpn-exit-ip"
 // prints it. Batter runs it as the relay uid (see ExitIPChecker) so the
 // request takes tethered devices' route.
 func ExitIPCommand(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: batter "+ExitIPSubcommand+" URL")
+	if len(args) != 1 && (len(args) != 3 || args[1] != "--connect") {
+		fmt.Fprintln(stderr, "usage: batter "+ExitIPSubcommand+" URL [--connect IP]")
 		return 2
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
+	if len(args) == 3 {
+		// Connect to the pre-resolved address; the URL's host still names
+		// the server for HTTP and TLS.
+		ip := args[2]
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		client.Transport = &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				_, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+			},
+		}
+	}
 	resp, err := client.Get(args[0])
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -51,7 +68,18 @@ func ExitIPChecker(exe, url string, uid uint32) func(ctx context.Context) (strin
 	return func(ctx context.Context) (string, error) {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, exe, ExitIPSubcommand, url)
+		// The relay uid can't reach local addresses, Docker's DNS resolver
+		// included, so resolve the check's host here (outside the tunnel;
+		// only the checker's own hostname leaks this way).
+		args := []string{ExitIPSubcommand, url}
+		if u, err := neturl.Parse(url); err == nil && net.ParseIP(u.Hostname()) == nil {
+			addrs, err := net.DefaultResolver.LookupIP(ctx, "ip4", u.Hostname())
+			if err != nil || len(addrs) == 0 {
+				return "", fmt.Errorf("resolve %s: %v", u.Hostname(), err)
+			}
+			args = append(args, "--connect", addrs[0].String())
+		}
+		cmd := exec.CommandContext(ctx, exe, args...)
 		if uid != 0 {
 			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid}}
 		}

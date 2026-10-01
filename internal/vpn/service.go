@@ -387,7 +387,11 @@ func (s *Service) apply(ctx context.Context, p *profile) {
 		s.errs = map[Slot]error{}
 	}
 	t := s.tunnels()
-	if err := t.installKillSwitch(ctx, p.slot); err != nil {
+	err := t.installFirewall(ctx)
+	if err == nil {
+		err = t.installKillSwitch(ctx, p.slot)
+	}
+	if err != nil {
 		s.stopRelay(p.slot)
 		s.errs[p.slot] = err
 		s.Logger.Error("vpn: kill switch not installed; relay kept off", "profile", p.name, "error", err)
@@ -399,7 +403,7 @@ func (s *Service) apply(ctx context.Context, p *profile) {
 		s.errs[p.slot] = nil
 		return
 	}
-	err := t.bringUp(ctx, p.slot, p.cfg)
+	err = t.bringUp(ctx, p.slot, p.cfg)
 	s.errs[p.slot] = err
 	if err != nil {
 		s.Logger.Error("vpn: tunnel not up; its phones have no internet until it is", "profile", p.name, "error", err)
