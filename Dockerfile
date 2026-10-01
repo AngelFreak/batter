@@ -23,27 +23,10 @@ RUN apk add --no-cache wget
 RUN wget -q -O /scrcpy-server \
     "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-server-v${SCRCPY_VERSION}"
 
-# Stage 4: gnirehtet (reverse tethering). The relay is built from source
-# because the release binary is glibc-only; libc is bumped because v2.5.1's
-# pinned libc crate links open64, which current musl no longer provides.
-FROM rust:1-alpine AS gnirehtet-builder
-ARG GNIREHTET_VERSION=2.5.1
-RUN apk add --no-cache musl-dev git
-RUN git clone -q --depth 1 --branch v${GNIREHTET_VERSION} https://github.com/Genymobile/gnirehtet /src
-WORKDIR /src/relay-rust
-RUN cargo update -q -p libc --precise 0.2.189 && cargo build --release
-
-FROM alpine:3.20 AS gnirehtet-apk
-ARG GNIREHTET_VERSION=2.5.1
-ARG GNIREHTET_ZIP_SHA256=dee55499ca4fef00ce2559c767d2d8130163736d43fdbce753e923e75309c275
-RUN apk add --no-cache wget unzip
-RUN wget -q -O /g.zip "https://github.com/Genymobile/gnirehtet/releases/download/v${GNIREHTET_VERSION}/gnirehtet-rust-linux64-v${GNIREHTET_VERSION}.zip" \
-    && echo "${GNIREHTET_ZIP_SHA256}  /g.zip" | sha256sum -c - \
-    && unzip -q -j /g.zip '*/gnirehtet.apk' -d /out
-
-# Stage 5: Production image
+# Stage 4: Production image
 FROM alpine:3.20
-# iproute2 + wg: WireGuard tunnel and policy routing for tethered devices.
+# iproute2 + wg + nftables: WireGuard tunnels, policy routing and the
+# firewall of the phone LAN.
 RUN apk add --no-cache ca-certificates android-tools nodejs iproute2 wireguard-tools-wg nftables
 
 WORKDIR /app
@@ -58,10 +41,6 @@ COPY --from=web-builder /app/public /app/web/public
 
 # Copy scrcpy-server
 COPY --from=scrcpy-downloader /scrcpy-server /usr/local/share/scrcpy/scrcpy-server
-
-# Copy gnirehtet relay + device app
-COPY --from=gnirehtet-builder /src/relay-rust/target/release/gnirehtet /usr/local/bin/gnirehtet
-COPY --from=gnirehtet-apk /out/gnirehtet.apk /usr/local/share/gnirehtet/gnirehtet.apk
 
 # Create data directory
 RUN mkdir -p /app/data

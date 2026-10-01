@@ -8,37 +8,57 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/XpertaDK/batter/internal/tether"
 	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TetherHandler assigns devices' VPN profiles. A device is tethered (uses
-// this host's internet over USB) exactly when it has a profile.
+// PhoneLAN is the phone network's controller (see internal/lan).
+type PhoneLAN interface {
+	// Reload re-applies the phones' routing after an assignment or profile
+	// change.
+	Reload(ctx context.Context) error
+}
+
+// errNoPhoneLAN is reported when a phone's internet is set on a server
+// without a phone network.
+var errNoPhoneLAN = errors.New("this server has no phone network (see docs/DEPLOY.md, \"Phone network\"); the setting applies once it does")
+
+// lanApplyTimeout bounds re-applying the phone LAN's routing.
+const lanApplyTimeout = 30 * time.Second
+
+// reloadLAN re-applies the phone LAN's routing even if the caller goes
+// away: the database already changed.
+func reloadLAN(ctx context.Context, lan PhoneLAN) error {
+	if lan == nil {
+		return errNoPhoneLAN
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lanApplyTimeout)
+	defer cancel()
+	return lan.Reload(ctx)
+}
+
+// TetherHandler assigns devices' VPN profiles. A phone on the phone LAN has
+// internet exactly when it has a profile, and only through it.
 type TetherHandler struct {
 	db     *pgxpool.Pool
-	tether *tether.Controller // nil when gnirehtet isn't installed
+	lan    PhoneLAN // nil without a phone network
 	vpn    *vpn.Service
 	logger *slog.Logger
 }
 
-// NewTetherHandler creates a tether handler. ctrl may be nil.
-func NewTetherHandler(db *pgxpool.Pool, ctrl *tether.Controller, svc *vpn.Service, logger *slog.Logger) *TetherHandler {
+// NewTetherHandler creates a tether handler. lan may be nil.
+func NewTetherHandler(db *pgxpool.Pool, lan PhoneLAN, svc *vpn.Service, logger *slog.Logger) *TetherHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &TetherHandler{db: db, tether: ctrl, vpn: svc, logger: logger.With("handler", "tether")}
+	return &TetherHandler{db: db, lan: lan, vpn: svc, logger: logger.With("handler", "tether")}
 }
 
-// tetherApplyTimeout covers installing the client app on first enable.
-const tetherApplyTimeout = 90 * time.Second
-
 // SetTether sets the device's VPN profile ({"profile_id": "<uuid>"}) or
-// turns tethering off ({"profile_id": null}), then applies it. The setting
-// is kept even when applying fails (e.g. the device is unplugged); the
-// reconcile loop applies it once the device is connected. Apply failures
-// are reported in apply_error rather than as an HTTP error.
+// takes its internet away ({"profile_id": null}), then re-applies the phone
+// LAN's routing. The setting is kept even when applying fails; apply_error
+// reports why rather than an HTTP error.
 func (h *TetherHandler) SetTether(c *gin.Context) {
 	serial := c.Param("serial")
 
@@ -52,9 +72,8 @@ func (h *TetherHandler) SetTether(c *gin.Context) {
 		return
 	}
 
-	var target tether.Target
 	if profileID != nil {
-		if target, err = h.vpn.Target(c.Request.Context(), *profileID); errors.Is(err, vpn.ErrNotFound) {
+		if err := h.vpn.Exists(c.Request.Context(), *profileID); errors.Is(err, vpn.ErrNotFound) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown VPN profile"})
 			return
 		} else if err != nil {
@@ -79,23 +98,9 @@ func (h *TetherHandler) SetTether(c *gin.Context) {
 	}
 
 	resp := gin.H{"serial": serial, "vpn_profile_id": profileID}
-	if err := h.apply(c.Request.Context(), serial, profileID != nil, target); err != nil {
-		h.logger.Warn("tether setting stored but not applied", "serial", serial, "profile", profileID, "error", err)
+	if err := reloadLAN(c.Request.Context(), h.lan); err != nil {
+		h.logger.Warn("phone internet setting stored but not applied", "serial", serial, "profile", profileID, "error", err)
 		resp["apply_error"] = err.Error()
 	}
 	c.JSON(http.StatusOK, resp)
 }
-
-func (h *TetherHandler) apply(ctx context.Context, serial string, on bool, target tether.Target) error {
-	if h.tether == nil {
-		return errTetherUnavailable
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tetherApplyTimeout)
-	defer cancel()
-	if on {
-		return h.tether.Enable(ctx, serial, target)
-	}
-	return h.tether.Disable(ctx, serial)
-}
-
-var errTetherUnavailable = errors.New("reverse tethering is unavailable on this server (gnirehtet not installed)")

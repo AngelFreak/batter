@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +21,6 @@ import (
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
 	"github.com/XpertaDK/batter/internal/migrate"
-	"github.com/XpertaDK/batter/internal/tether"
 	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,44 +43,28 @@ type testEnv struct {
 	db     *pgxpool.Pool
 	jwt    *auth.JWTManager
 	users  map[string]string // username -> id
-	adb    *unpluggedADB
+	lan    *fakeLAN
 	dm     *device.Manager
 }
 
-// unpluggedADB records tethering's adb calls and fails them all, as for a
-// device that isn't attached.
-type unpluggedADB struct {
-	mu    sync.Mutex
-	calls []string
+// fakeLAN stands in for the phone LAN's controller, recording reloads.
+type fakeLAN struct {
+	mu      sync.Mutex
+	reloads int
+	err     error
 }
 
-func (a *unpluggedADB) fail(serial string, args ...string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.calls = append(a.calls, serial+" "+strings.Join(args, " "))
-	return fmt.Errorf("device '%s' not found", serial)
+func (l *fakeLAN) Reload(context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.reloads++
+	return l.err
 }
 
-func (a *unpluggedADB) called(prefix string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return slices.ContainsFunc(a.calls, func(c string) bool { return strings.HasPrefix(c, prefix) })
-}
-
-func (a *unpluggedADB) Shell(_ context.Context, serial string, args ...string) ([]byte, error) {
-	return nil, a.fail(serial, append([]string{"shell"}, args...)...)
-}
-func (a *unpluggedADB) Install(_ context.Context, serial, apk string) ([]byte, error) {
-	return nil, a.fail(serial, "install", apk)
-}
-func (a *unpluggedADB) Reverse(_ context.Context, serial, name string, port int) error {
-	return a.fail(serial, "reverse", name, fmt.Sprint(port))
-}
-func (a *unpluggedADB) RemoveReverse(_ context.Context, serial, name string) error {
-	return a.fail(serial, "reverse", "--remove", name)
-}
-func (a *unpluggedADB) ListReverse(_ context.Context, serial string) (map[string]string, error) {
-	return nil, a.fail(serial, "reverse", "--list")
+func (l *fakeLAN) reloaded() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.reloads
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -104,22 +87,21 @@ func newTestEnv(t *testing.T) *testEnv {
 		db:    db,
 		jwt:   auth.NewJWTManager("test-secret", 3600),
 		users: map[string]string{},
-		adb:   &unpluggedADB{},
+		lan:   &fakeLAN{},
 		dm:    dm,
 	}
 	vpnSvc := &vpn.Service{
 		DB: db,
-		// Never touch the test machine's network or start relays.
+		// Never touch the test machine's network.
 		Run:    func(context.Context, string, string, ...string) ([]byte, error) { return nil, nil },
 		Logger: logger,
 	}
-	t.Cleanup(vpnSvc.Stop)
 	router, err := api.NewRouter(api.RouterConfig{
 		DeviceManager: dm,
 		DB:            db,
 		JWTManager:    env.jwt,
 		Logger:        logger,
-		Tether:        &tether.Controller{ADB: env.adb, APK: "/nonexistent/gnirehtet.apk", Logger: logger},
+		LAN:           env.lan,
 		VPN:           vpnSvc,
 	})
 	if err != nil {
@@ -535,8 +517,8 @@ func TestTetherAssignmentNeedsManageAndPersists(t *testing.T) {
 		}
 	}
 
-	// The test device isn't attached, so applying fails, but the setting is
-	// kept and applied when the device connects.
+	// The phone LAN's routing follows the assignment straight away.
+	reloads := env.lan.reloaded()
 	w := env.do(t, "manager", "PUT", path, assign)
 	if w.Code != http.StatusOK {
 		t.Fatalf("manager: status %d; body: %s", w.Code, w.Body.String())
@@ -545,12 +527,23 @@ func TestTetherAssignmentNeedsManageAndPersists(t *testing.T) {
 		ProfileID  *string `json:"vpn_profile_id"`
 		ApplyError string  `json:"apply_error"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.ProfileID == nil || *resp.ProfileID != profile || resp.ApplyError == "" {
-		t.Fatalf("want the profile and the apply error reported; body: %s", w.Body.String())
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.ProfileID == nil || *resp.ProfileID != profile || resp.ApplyError != "" {
+		t.Fatalf("want the profile stored and applied; body: %s", w.Body.String())
 	}
 	if got := env.deviceProfile(t); got == nil || *got != profile {
 		t.Fatalf("profile not stored: %v", got)
 	}
+	if env.lan.reloaded() <= reloads {
+		t.Fatal("assignment stored but the LAN's routing not reloaded")
+	}
+
+	// When applying fails the setting is still kept; the error is reported.
+	env.lan.err = errors.New("nft: Operation not permitted")
+	w = env.do(t, "manager", "PUT", path, assign)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"apply_error":"nft: Operation not permitted"`) {
+		t.Fatalf("failed apply: %d %s", w.Code, w.Body.String())
+	}
+	env.lan.err = nil
 
 	w = env.do(t, "manager", "GET", "/api/v1/devices/"+testSerial, "")
 	var dev struct {
@@ -577,9 +570,6 @@ func TestTetherAssignmentNeedsManageAndPersists(t *testing.T) {
 	if got := env.deviceProfile(t); got != nil {
 		t.Fatalf("profile still set after turning tethering off: %s", *got)
 	}
-	if !env.adb.called(testSerial + " shell am start -a com.genymobile.gnirehtet.STOP") {
-		t.Fatalf("turning off didn't try to stop the client: %v", env.adb.calls)
-	}
 
 	if w := env.do(t, "admin", "PUT", "/api/v1/devices/NOSUCHDEVICE/tether", assign); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown device: status %d, want 404", w.Code)
@@ -592,7 +582,7 @@ func TestDeletingAProfileTurnsItsPhonesOff(t *testing.T) {
 	if w := env.do(t, "manager", "PUT", "/api/v1/devices/"+testSerial+"/tether", `{"profile_id":"`+profile+`"}`); w.Code != http.StatusOK {
 		t.Fatalf("assign: %d %s", w.Code, w.Body.String())
 	}
-	env.adb.calls = nil
+	reloads := env.lan.reloaded()
 
 	w := env.do(t, "admin", "DELETE", "/api/v1/vpn/profiles/"+profile, "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), testSerial) {
@@ -601,8 +591,8 @@ func TestDeletingAProfileTurnsItsPhonesOff(t *testing.T) {
 	if got := env.deviceProfile(t); got != nil {
 		t.Fatalf("phone still on the deleted profile")
 	}
-	if !env.adb.called(testSerial + " shell am start -a com.genymobile.gnirehtet.STOP") {
-		t.Fatalf("deleting the profile didn't turn the phone's tethering off: %v", env.adb.calls)
+	if env.lan.reloaded() <= reloads {
+		t.Fatal("deleting the profile didn't reload the LAN's routing")
 	}
 }
 

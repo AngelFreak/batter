@@ -120,8 +120,8 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}, nil
 }
 
-// ADB returns the manager's adb client, for features (reverse tethering)
-// that drive devices outside of scrcpy sessions.
+// ADB returns the manager's adb client, for features (the phone LAN) that
+// drive devices outside of scrcpy sessions.
 func (m *Manager) ADB() *ADB {
 	return m.adb
 }
@@ -217,7 +217,7 @@ func (m *Manager) rememberAudioFailureLocked(serial string, s *Session) {
 
 // killDeviceServer force-kills any lingering scrcpy-server on the device and
 // removes scrcpy's reverse tunnels so a new session can bind its abstract
-// socket. Other tunnels (reverse tethering) are left in place.
+// socket. Other tunnels are left in place.
 func (m *Manager) killDeviceServer(ctx context.Context, serial string) {
 	_, _ = m.adb.Shell(ctx, serial, "pkill", "-9", "-f", "app_process.*scrcpy")
 	specs, err := m.adb.ListReverse(ctx, serial)
@@ -534,7 +534,7 @@ type DeviceInfo struct {
 	// viewers; the latest choice wins).
 	SessionQuality Quality    `json:"session_quality,omitempty"`
 	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
-	// VPNProfileID is set when the device is tethered, through that profile.
+	// VPNProfileID is set when the device has internet, through that profile.
 	VPNProfileID   string `json:"vpn_profile_id,omitempty"`
 	VPNProfileName string `json:"vpn_profile_name,omitempty"`
 	// Connection is how adb reaches the device: "usb" or "lan" (ethernet

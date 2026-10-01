@@ -30,11 +30,8 @@ type Config struct {
 	ScrcpyServerPath string
 	ScrcpyVersion    string
 
-	// Reverse tethering (gnirehtet). Disabled if the binary is missing.
-	GnirehtetPath string
-	GnirehtetAPK  string
 	// VPNExitIPURL answers with the caller's public IP (plain text); used to
-	// check where tethered traffic exits.
+	// check where a VPN profile's phones exit.
 	VPNExitIPURL string
 
 	// Auth
@@ -57,8 +54,6 @@ func Load() (*Config, error) {
 		DatabaseURL:      getEnv("DATABASE_URL", "postgres://batter:batter@localhost:5432/batter?sslmode=disable"),
 		ScrcpyServerPath: getEnv("SCRCPY_SERVER_PATH", "/usr/local/share/scrcpy/scrcpy-server"),
 		ScrcpyVersion:    getEnv("SCRCPY_VERSION", "3.3.4"),
-		GnirehtetPath:    getEnv("GNIREHTET_PATH", "/usr/local/bin/gnirehtet"),
-		GnirehtetAPK:     getEnv("GNIREHTET_APK", "/usr/local/share/gnirehtet/gnirehtet.apk"),
 		VPNExitIPURL:     getEnv("VPN_EXIT_IP_URL", "https://api.ipify.org"),
 		JWTSecret:        getEnv("JWT_SECRET", ""),
 		DataDir:          getEnv("DATA_DIR", "./data"),

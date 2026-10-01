@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/XpertaDK/batter/internal/tether"
 )
 
 // MaxProfiles caps the number of profiles (slots).
@@ -20,28 +18,40 @@ const MaxProfiles = 32
 // killSwitchMetric ranks the unreachable default below any tunnel route.
 const killSwitchMetric = "4294967295"
 
-// ErrKillSwitch means a relay uid could not be fenced off, so its traffic
-// would bypass the tunnel. That relay must not run.
+// ErrKillSwitch means a slot's traffic could not be fenced off, so it would
+// bypass the tunnel. The tunnel stays down until it can be.
 var ErrKillSwitch = errors.New("vpn kill switch not installed")
 
-// Slot identifies one profile's relay, tunnel and routing. Everything is
-// derived from it, so a profile keeps its uid, port and interface for life.
+// checkerUID is slot 0's exit-IP checker uid (the gnirehtet relays' old
+// uid range, kept so existing hosts' rules stay meaningful).
+const checkerUID = 31416
+
+// Slot identifies one profile's tunnel and routing. Everything is derived
+// from it, so a profile keeps its mark, uid and interface for life.
 type Slot int
 
-// UID is the slot's relay uid; only its traffic is routed into the tunnel.
-func (s Slot) UID() uint32 { return tether.RelayUID + uint32(s) }
+// UID is the slot's exit-IP checker uid; its traffic is routed like the
+// slot's phones' (see ExitIPChecker).
+func (s Slot) UID() uint32 { return checkerUID + uint32(s) }
 
-// Port is the slot's relay port, which its phones' adb reverse points at.
-func (s Slot) Port() int { return tether.RelayPort + int(s) }
+// Mark is the firewall mark the LAN firewall puts on the slot's phones'
+// packets; it routes them to the slot's table. It equals the table number.
+func (s Slot) Mark() uint32 { return 51820 + uint32(s) }
 
 func (s Slot) iface() string { return "wg" + strconv.Itoa(int(s)) }
 
-// table holds the relay uid's routes: the tunnel's AllowedIPs, then an
+// table holds the slot's routes: the tunnel's AllowedIPs, then an
 // unreachable default as the kill switch.
 func (s Slot) table() string { return strconv.Itoa(51820 + int(s)) }
 
-// priority puts the slot's rule ahead of the main table's (32766).
+// priority puts the checker uid's rule ahead of the main table's (32766).
 func (s Slot) priority() string { return strconv.Itoa(10000 + int(s)) }
+
+// markPriority puts the phones' mark rule ahead of the LAN's catch-all
+// (lan.catchAllPriority, 9900) and the main table.
+func (s Slot) markPriority() string { return strconv.Itoa(9000 + int(s)) }
+
+func (s Slot) mark() string { return strconv.FormatUint(uint64(s.Mark()), 10) }
 
 func (s Slot) uidrange() string {
 	uid := strconv.FormatUint(uint64(s.UID()), 10)
@@ -75,18 +85,21 @@ type PeerStatus struct {
 	TxBytes         int64      `json:"tx_bytes"`
 }
 
-// relayFirewall is the nftables ruleset confining every relay uid (all
-// slots) to WireGuard interfaces. Policy routing alone isn't enough: the
-// kernel's local table is consulted before the uid rules, so a relay uid
-// could reach the container's own addresses (Batter's backend and web
-// app, 127.0.0.0/8) without any tunnel. Replies on connections made to a
-// relay (adb's connection into its port) stay allowed. The table is
-// replaced in one transaction, so re-applying never opens a window.
-func relayFirewall() string {
+// checkerFirewall is the nftables ruleset confining every exit-IP checker
+// uid (all slots) to WireGuard interfaces. Policy routing alone isn't
+// enough: the kernel's local table is consulted before the uid rules, so a
+// checker could reach the container's own addresses (Batter's backend and
+// web app, 127.0.0.0/8) without any tunnel, and report a misleading
+// result. The table is replaced in one transaction, so re-applying never
+// opens a window. It also removes the gnirehtet version's batter_relay
+// table.
+func checkerFirewall() string {
 	uids := fmt.Sprintf("%d-%d", Slot(0).UID(), Slot(MaxProfiles-1).UID())
 	return "table inet batter_relay {}\n" +
 		"delete table inet batter_relay\n" +
-		"table inet batter_relay {\n" +
+		"table inet batter_exitcheck {}\n" +
+		"delete table inet batter_exitcheck\n" +
+		"table inet batter_exitcheck {\n" +
 		"\tchain output {\n" +
 		"\t\ttype filter hook output priority 0; policy accept;\n" +
 		"\t\tmeta skuid " + uids + " ct state established,related accept\n" +
@@ -96,10 +109,10 @@ func relayFirewall() string {
 		"}\n"
 }
 
-// installFirewall (re)loads relayFirewall. Without it a relay must not run.
+// installFirewall (re)loads checkerFirewall.
 func (t *tunnels) installFirewall(ctx context.Context) error {
-	if _, err := t.cmd(ctx, relayFirewall(), "nft", "-f", "/dev/stdin"); err != nil {
-		return fmt.Errorf("%w: relay firewall: %v", ErrKillSwitch, err)
+	if _, err := t.cmd(ctx, checkerFirewall(), "nft", "-f", "/dev/stdin"); err != nil {
+		return fmt.Errorf("%w: exit-check firewall: %v", ErrKillSwitch, err)
 	}
 	return nil
 }
@@ -110,10 +123,10 @@ type tunnels struct {
 	logger *slog.Logger
 }
 
-// installKillSwitch sends the slot's relay uid to its own table, whose last
-// resort is unreachable. It's idempotent and never removes anything, so
-// re-applying a config doesn't open a window where the relay's traffic goes
-// direct.
+// installKillSwitch sends the slot's phones (by mark) and checker uid to
+// its own table, whose last resort is unreachable. It's idempotent and
+// never removes anything, so re-applying a config doesn't open a window
+// where the slot's traffic goes direct.
 func (t *tunnels) installKillSwitch(ctx context.Context, s Slot) error {
 	for _, v6 := range []bool{false, true} {
 		err := t.ensureRule(ctx, v6, s)
@@ -134,7 +147,18 @@ func (t *tunnels) installKillSwitch(ctx context.Context, s Slot) error {
 }
 
 func (t *tunnels) ensureRule(ctx context.Context, v6 bool, s Slot) error {
-	out, err := t.ip(ctx, v6, "rule", "show", "priority", s.priority())
+	out, err := t.ip(ctx, v6, "rule", "show", "priority", s.markPriority())
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(string(out), fmt.Sprintf("fwmark %#x ", s.Mark())) {
+		_, err = t.ip(ctx, v6, "rule", "add", "fwmark", s.mark(),
+			"lookup", s.table(), "priority", s.markPriority())
+		if err != nil {
+			return err
+		}
+	}
+	out, err = t.ip(ctx, v6, "rule", "show", "priority", s.priority())
 	if err != nil {
 		return err
 	}
@@ -194,7 +218,7 @@ func (t *tunnels) takeDown(ctx context.Context, s Slot) {
 
 // relaxReversePathFilter makes replies arriving on iface acceptable. Strict
 // reverse-path filtering checks the source against the main table (the
-// check doesn't carry the relay's uid), which routes the internet via eth0,
+// check doesn't carry the mark or uid), which routes the internet via eth0,
 // so it would drop every reply. Loose mode only needs some route back.
 func (t *tunnels) relaxReversePathFilter(ctx context.Context, iface string) {
 	if out, err := t.cmd(ctx, "", "sysctl", "-n", "net.ipv4.conf.all.rp_filter"); err == nil && strings.TrimSpace(string(out)) == "1" {
@@ -214,6 +238,11 @@ func (t *tunnels) teardown(ctx context.Context, s Slot) {
 		// Delete every copy, in case one was ever added twice.
 		for range 10 {
 			if _, err := t.ip(ctx, v6, "rule", "del", "uidrange", s.uidrange(), "lookup", s.table()); err != nil {
+				break
+			}
+		}
+		for range 10 {
+			if _, err := t.ip(ctx, v6, "rule", "del", "fwmark", s.mark(), "lookup", s.table()); err != nil {
 				break
 			}
 		}

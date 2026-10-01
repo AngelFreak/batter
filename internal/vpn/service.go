@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/XpertaDK/batter/internal/tether"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -25,22 +25,26 @@ var ErrNotFound = errors.New("vpn profile not found")
 const applyTimeout = 30 * time.Second
 
 // Service owns the VPN profiles: their rows in the database, and for each
-// one a slot's kill switch, tunnel and relay. A relay never runs before its
+// one a slot's kill switch and tunnel. A tunnel never comes up before its
 // slot's kill switch is installed.
 type Service struct {
 	DB     *pgxpool.Pool
 	Run    RunFunc // nil = Exec
 	Logger *slog.Logger
-	// StartRelay runs a gnirehtet relay as uid on port until ctx is done;
-	// nil when gnirehtet isn't installed.
-	StartRelay func(ctx context.Context, uid uint32, port int)
 	// CheckExitAs reports the public IP that uid's traffic leaves from; nil
 	// if unavailable.
 	CheckExitAs func(ctx context.Context, uid uint32) (string, error)
 
-	mu     sync.Mutex
-	relays map[Slot]context.CancelFunc
-	errs   map[Slot]error // last apply error per slot
+	mu   sync.Mutex
+	errs map[Slot]error // last apply error per slot
+}
+
+// Assignment is where a phone's traffic goes: the mark that routes it to
+// its profile's table, and the profile's DNS server (invalid if it has no
+// IPv4 one).
+type Assignment struct {
+	Mark uint32
+	DNS  netip.Addr
 }
 
 // ProfileInfo describes a profile for admins. It never contains secrets.
@@ -93,16 +97,6 @@ func (s *Service) Sync(ctx context.Context) error {
 		s.apply(ctx, p)
 	}
 	return nil
-}
-
-// Stop stops every relay (on shutdown). Tunnels and kill switches stay.
-func (s *Service) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for slot, cancel := range s.relays {
-		cancel()
-		delete(s.relays, slot)
-	}
 }
 
 // Create stores and applies a new profile. Invalid input returns a
@@ -172,9 +166,9 @@ func (s *Service) Update(ctx context.Context, id string, u ProfileUpdate) (Profi
 	return s.info(ctx, p)
 }
 
-// Delete removes a profile, its relay, tunnel and routing. It returns the
-// phones that were assigned to it; they are unassigned (ON DELETE SET NULL)
-// and the caller should turn their tethering off.
+// Delete removes a profile, its tunnel and routing. It returns the phones
+// that were assigned to it; they are unassigned (ON DELETE SET NULL), which
+// leaves them without internet.
 func (s *Service) Delete(ctx context.Context, id string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -202,9 +196,10 @@ func (s *Service) Delete(ctx context.Context, id string) ([]string, error) {
 		return nil, err
 	}
 
-	s.stopRelay(p.slot)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), applyTimeout)
 	defer cancel()
+	// Until the LAN firewall drops the phones' mark, their packets find no
+	// route in the flushed table and fall to the LAN's catch-all.
 	s.tunnels().teardown(ctx, p.slot)
 	delete(s.errs, p.slot)
 	s.Logger.Info("vpn profile deleted", "profile", p.name, "slot", p.slot, "unassigned", serials)
@@ -254,41 +249,44 @@ func (s *Service) Names(ctx context.Context) ([]ProfileName, error) {
 	})
 }
 
-// Target returns where phones on the profile tether to.
-func (s *Service) Target(ctx context.Context, id string) (tether.Target, error) {
-	p, err := s.get(ctx, id)
-	if err != nil {
-		return tether.Target{}, err
-	}
-	return tether.Target{Port: p.slot.Port(), DNS: p.cfg.DNS}, nil
+// Exists reports ErrNotFound unless a profile has the given id.
+func (s *Service) Exists(ctx context.Context, id string) error {
+	_, err := s.get(ctx, id)
+	return err
 }
 
-// TetherTargets maps each phone with a profile to its profile's target.
-func (s *Service) TetherTargets(ctx context.Context) (map[string]tether.Target, error) {
+// Assignments maps each phone with a profile to where its traffic goes.
+// A disabled profile's phones keep its mark: its kill switch blocks them.
+func (s *Service) Assignments(ctx context.Context) (map[string]Assignment, error) {
 	rows, err := s.DB.Query(ctx,
 		`SELECT d.serial, p.slot, p.config FROM devices d JOIN vpn_profiles p ON p.id = d.vpn_profile_id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	targets := map[string]tether.Target{}
+	out := map[string]Assignment{}
 	for rows.Next() {
 		var serial, config string
 		var slot int
 		if err := rows.Scan(&serial, &slot, &config); err != nil {
 			return nil, err
 		}
-		t := tether.Target{Port: Slot(slot).Port()}
+		a := Assignment{Mark: Slot(slot).Mark()}
 		if cfg, err := Parse(config); err == nil {
-			t.DNS = cfg.DNS
+			for _, d := range cfg.DNS {
+				if ip, err := netip.ParseAddr(d); err == nil && ip.Is4() {
+					a.DNS = ip
+					break
+				}
+			}
 		}
-		targets[serial] = t
+		out[serial] = a
 	}
-	return targets, rows.Err()
+	return out, rows.Err()
 }
 
 // CheckExit reports the public IP the profile's phones exit from, by making
-// a request as its relay's uid.
+// a request as its checker uid, which is routed like the phones.
 func (s *Service) CheckExit(ctx context.Context, id string) (string, error) {
 	p, err := s.get(ctx, id)
 	if err != nil {
@@ -379,9 +377,9 @@ func (s *Service) applyDetached(ctx context.Context, p *profile) {
 	s.apply(ctx, p)
 }
 
-// apply makes p's slot match it: kill switch always; tunnel and relay only
-// while enabled. The relay starts only once the kill switch is in, and may
-// run while the tunnel is broken since the kill switch then blocks it.
+// apply makes p's slot match it: kill switch always; tunnel only while
+// enabled, and only once the kill switch is in. While the tunnel is down
+// the kill switch blocks the slot's phones.
 func (s *Service) apply(ctx context.Context, p *profile) {
 	if s.errs == nil {
 		s.errs = map[Slot]error{}
@@ -392,14 +390,13 @@ func (s *Service) apply(ctx context.Context, p *profile) {
 		err = t.installKillSwitch(ctx, p.slot)
 	}
 	if err != nil {
-		s.stopRelay(p.slot)
+		t.takeDown(ctx, p.slot)
 		s.errs[p.slot] = err
-		s.Logger.Error("vpn: kill switch not installed; relay kept off", "profile", p.name, "error", err)
+		s.Logger.Error("vpn: kill switch not installed; tunnel kept down", "profile", p.name, "error", err)
 		return
 	}
 	if !p.enabled {
 		t.takeDown(ctx, p.slot)
-		s.stopRelay(p.slot)
 		s.errs[p.slot] = nil
 		return
 	}
@@ -409,26 +406,6 @@ func (s *Service) apply(ctx context.Context, p *profile) {
 		s.Logger.Error("vpn: tunnel not up; its phones have no internet until it is", "profile", p.name, "error", err)
 	} else {
 		s.Logger.Info("vpn: tunnel up", "profile", p.name, "iface", p.slot.iface())
-	}
-	s.startRelay(p.slot)
-}
-
-func (s *Service) startRelay(slot Slot) {
-	if s.StartRelay == nil || s.relays[slot] != nil {
-		return
-	}
-	if s.relays == nil {
-		s.relays = map[Slot]context.CancelFunc{}
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s.relays[slot] = cancel
-	s.StartRelay(ctx, slot.UID(), slot.Port())
-}
-
-func (s *Service) stopRelay(slot Slot) {
-	if cancel := s.relays[slot]; cancel != nil {
-		cancel()
-		delete(s.relays, slot)
 	}
 }
 
