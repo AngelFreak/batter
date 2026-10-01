@@ -1,4 +1,5 @@
 import { getToken } from './auth';
+import { Reconnector } from './reconnect';
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 
@@ -16,6 +17,9 @@ export class DeviceThumbnailPlayer {
   private pps: Uint8Array | null = null;
   private configured = false;
   private onStatusChange: ((status: string) => void) | null = null;
+  private serial = "";
+  private stopped = true;
+  private reconnector = new Reconnector(() => { if (!this.stopped) this.open(); });
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -28,30 +32,50 @@ export class DeviceThumbnailPlayer {
     this.onStatusChange = cb;
   }
 
+  /** Stream video for serial, reconnecting with backoff until disconnect(). */
   connect(serial: string) {
+    this.serial = serial;
+    this.stopped = false;
+    this.reconnector.reset();
+    this.open();
+  }
+
+  private open() {
     const token = getToken();
     const base =
       WS_BASE_URL ||
       `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
-    const url = `${base}/ws/device/${encodeURIComponent(serial)}/video?token=${encodeURIComponent(token || '')}`;
+    const url = `${base}/ws/device/${encodeURIComponent(this.serial)}/video?token=${encodeURIComponent(token || '')}`;
 
-    this.ws = new WebSocket(url);
-    this.ws.binaryType = "arraybuffer";
+    const ws = new WebSocket(url);
+    this.ws = ws;
+    ws.binaryType = "arraybuffer";
 
-    this.ws.onopen = () => {
+    // Handlers ignore events from sockets that have since been replaced.
+    ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.onStatusChange?.("connected");
       this.initDecoder();
     };
 
-    this.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (this.ws !== ws) return;
+      this.reconnector.reset();
       this.handleMessage(event.data as ArrayBuffer);
     };
 
-    this.ws.onclose = () => {
-      this.onStatusChange?.("disconnected");
+    ws.onclose = () => {
+      if (this.ws !== ws) return;
+      this.ws = null;
+      this.resetDecoder();
+      // Another viewer upgrading/downgrading the session, or a backend
+      // restart, ends the stream; reconnect rather than freeze the tile.
+      this.onStatusChange?.("reconnecting");
+      this.reconnector.schedule();
     };
 
-    this.ws.onerror = () => {
+    ws.onerror = () => {
+      if (this.ws !== ws) return;
       this.onStatusChange?.("error");
     };
   }
@@ -72,8 +96,10 @@ export class DeviceThumbnailPlayer {
         frame.close();
       },
       error: () => {
-        // Decoder hit a fatal error — reset and reconfigure on next keyframe
+        // Decoder hit a fatal error — replace it and reconfigure from the
+        // stored SPS/PPS on the next packet
         this.configured = false;
+        try { this.decoder?.close(); } catch { /* already closed */ }
         this.initDecoder();
       },
     });
@@ -205,11 +231,19 @@ export class DeviceThumbnailPlayer {
   }
 
   disconnect() {
-    if (this.ws) { this.ws.close(); this.ws = null; }
+    this.stopped = true;
+    this.reconnector.cancel();
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close();
+    this.resetDecoder();
+  }
+
+  private resetDecoder() {
     if (this.decoder && this.decoder.state !== "closed") {
       try { this.decoder.close(); } catch { /* ignore */ }
-      this.decoder = null;
     }
+    this.decoder = null;
     this.configured = false;
     this.sps = null;
     this.pps = null;

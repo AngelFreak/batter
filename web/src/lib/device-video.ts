@@ -1,4 +1,5 @@
 import { getToken } from './auth';
+import { Reconnector } from './reconnect';
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 
@@ -15,6 +16,10 @@ export class DeviceVideoPlayer {
   private _fps = 0;
   private onFpsUpdate: ((fps: number) => void) | null = null;
   private onStatusChange: ((status: string) => void) | null = null;
+  private serial = "";
+  private stopped = true;
+  private beforeReconnect: (() => Promise<unknown>) | null = null;
+  private reconnector = new Reconnector(() => void this.reopen());
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -35,32 +40,72 @@ export class DeviceVideoPlayer {
     this.onStatusChange = cb;
   }
 
+  /**
+   * Hook awaited before each reconnect attempt, e.g. to restart the device
+   * session after a backend restart (the video endpoint 404s without one).
+   * Errors are ignored; the attempt proceeds and backs off if it fails.
+   */
+  setBeforeReconnect(fn: () => Promise<unknown>) {
+    this.beforeReconnect = fn;
+  }
+
+  /** Stream video for serial, reconnecting with backoff until disconnect(). */
   connect(serial: string) {
+    this.serial = serial;
+    this.stopped = false;
+    this.reconnector.reset();
+    this.open();
+  }
+
+  private async reopen() {
+    if (this.beforeReconnect) {
+      try {
+        await this.beforeReconnect();
+      } catch {
+        // proceed; a failed attempt just backs off further
+      }
+    }
+    if (!this.stopped) this.open();
+  }
+
+  private open() {
     const token = getToken();
     const base =
       WS_BASE_URL ||
       `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
-    const url = `${base}/ws/device/${encodeURIComponent(serial)}/video?token=${encodeURIComponent(token || '')}`;
+    const url = `${base}/ws/device/${encodeURIComponent(this.serial)}/video?token=${encodeURIComponent(token || '')}`;
 
     this.onStatusChange?.("connecting");
 
-    this.ws = new WebSocket(url);
-    this.ws.binaryType = "arraybuffer";
+    const ws = new WebSocket(url);
+    this.ws = ws;
+    ws.binaryType = "arraybuffer";
 
-    this.ws.onopen = () => {
+    // Handlers ignore events from sockets that have since been replaced.
+    ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.onStatusChange?.("connected");
       this.initDecoder();
     };
 
-    this.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (this.ws !== ws) return;
+      this.reconnector.reset();
       this.handleVideoMessage(event.data as ArrayBuffer);
     };
 
-    this.ws.onclose = () => {
-      this.onStatusChange?.("disconnected");
+    ws.onclose = () => {
+      if (this.ws !== ws) return;
+      this.ws = null;
+      this.resetDecoder();
+      // Sessions restart on quality changes and backend restarts, which
+      // closes the stream; reconnect rather than leave a frozen frame.
+      this.onStatusChange?.("reconnecting");
+      this.reconnector.schedule();
     };
 
-    this.ws.onerror = () => {
+    ws.onerror = () => {
+      if (this.ws !== ws) return;
       this.onStatusChange?.("error");
     };
   }
@@ -281,18 +326,23 @@ export class DeviceVideoPlayer {
   }
 
   disconnect() {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
+    this.stopped = true;
+    this.reconnector.cancel();
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close();
+    this.resetDecoder();
+  }
+
+  private resetDecoder() {
     if (this.decoder && this.decoder.state !== "closed") {
       try {
         this.decoder.close();
       } catch {
         // Ignore close errors
       }
-      this.decoder = null;
     }
+    this.decoder = null;
     this.configured = false;
     this.sps = null;
     this.pps = null;

@@ -2,38 +2,9 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Minimal browser globals the handler touches.
-class FakeWebSocket {
-  static OPEN = 1;
-  static instances: FakeWebSocket[] = [];
-  readyState = 0;
-  sent: string[] = [];
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((e: { data: string }) => void) | null = null;
-  constructor(public url: string) {
-    FakeWebSocket.instances.push(this);
-  }
-  open() {
-    this.readyState = FakeWebSocket.OPEN;
-    this.onopen?.();
-  }
-  send(data: string) {
-    this.sent.push(data);
-  }
-  // Like a browser, close() doesn't fire onclose synchronously.
-  close() {
-    this.readyState = 3;
-  }
-  fireClose() {
-    this.onclose?.();
-  }
-}
-const g = globalThis as Record<string, unknown>;
-g.WebSocket = FakeWebSocket;
-g.window = { location: { protocol: 'http:', host: 'test' } };
-g.localStorage = { getItem: () => 'tok' };
+import { FakeWebSocket, installBrowserEnv } from './test-browser-env';
+
+installBrowserEnv();
 
 // Imported after globals exist.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -84,7 +55,7 @@ test('a late close from a removed socket does not drop its replacement', () => {
   const fresh = socketFor('A');
   assert.notEqual(fresh, old);
   fresh.open();
-  old.fireClose();
+  old.drop();
 
   h.sendText('hi');
   assert.equal(fresh.sent.length, 1, 'replacement connection was dropped by stale close');

@@ -8,5 +8,5 @@
     "outDir": ".test-out",
     "plugins": []
   },
-  "include": ["src/lib/**/*.test.ts"]
+  "include": ["src/lib/**/*.test.ts", "src/lib/test-browser-env.ts"]
 }

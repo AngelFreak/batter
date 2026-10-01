@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { DeviceViewer } from '@/components/device/device-viewer';
 import { getDevice, startSession, stopSession, upgradeSession, downgradeSession, DeviceInfo } from '@/lib/api';
@@ -51,6 +51,11 @@ export default function DeviceDetailPage() {
     };
   }, [serial]);
 
+  // The stream drops when the backend restarts (sessions don't survive it).
+  // Start a fresh session before the viewer reconnects; this is a no-op on
+  // the server if the session is still alive.
+  const ensureSession = useCallback(() => startSession(serial), [serial]);
+
   const handleStop = async () => {
     try {
       await stopSession(serial);
@@ -95,7 +100,7 @@ export default function DeviceDetailPage() {
               {error}
             </div>
           ) : device?.has_session ? (
-            <DeviceViewer serial={serial} />
+            <DeviceViewer serial={serial} onStreamLost={ensureSession} />
           ) : (
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">
               No active session

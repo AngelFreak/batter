@@ -1,5 +1,6 @@
 import { keycodeMap } from "./device-keymap";
 import { getToken } from "./auth";
+import { Reconnector } from "./reconnect";
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 
@@ -27,7 +28,7 @@ export class DeviceInputHandler {
   private onClipboardReceive: ((text: string) => void) | null = null;
   private serial: string = "";
   private stopped = false;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnector = new Reconnector(() => this.doConnect());
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -44,6 +45,7 @@ export class DeviceInputHandler {
   connect(serial: string) {
     this.serial = serial;
     this.stopped = false;
+    this.reconnector.reset();
     this.doConnect();
   }
 
@@ -59,6 +61,9 @@ export class DeviceInputHandler {
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
+      // Control has no steady data flow to wait for; RBAC/auth failures are
+      // rejected before the upgrade, so an open socket is a healthy one.
+      this.reconnector.reset();
       this.hasControl = true;
       this.onStatusChange?.("connected");
       this.attachListeners();
@@ -69,7 +74,7 @@ export class DeviceInputHandler {
       this.detachListeners();
       if (!this.stopped) {
         this.onStatusChange?.("reconnecting");
-        this.reconnectTimer = setTimeout(() => this.doConnect(), 2000);
+        this.reconnector.schedule();
       } else {
         this.onStatusChange?.("disconnected");
       }
@@ -277,10 +282,7 @@ export class DeviceInputHandler {
 
   disconnect() {
     this.stopped = true;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    this.reconnector.cancel();
     this.detachListeners();
     if (this.ws) {
       this.ws.close();

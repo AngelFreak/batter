@@ -7,9 +7,11 @@ import { fetchScreenshot, pushFile, installAPK } from '@/lib/api';
 
 interface DeviceViewerProps {
   serial: string;
+  /** Awaited before each video reconnect, e.g. to restart a lost session. */
+  onStreamLost?: () => Promise<unknown>;
 }
 
-export function DeviceViewer({ serial }: DeviceViewerProps) {
+export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<DeviceVideoPlayer | null>(null);
@@ -26,6 +28,9 @@ export function DeviceViewer({ serial }: DeviceViewerProps) {
   const [clipboardText, setClipboardText] = useState('');
   const [dragging, setDragging] = useState(false);
   const [showClipboard, setShowClipboard] = useState(false);
+  // Read through a ref so a new callback identity doesn't recreate the player.
+  const onStreamLostRef = useRef(onStreamLost);
+  onStreamLostRef.current = onStreamLost;
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -42,6 +47,7 @@ export function DeviceViewer({ serial }: DeviceViewerProps) {
     playerRef.current = player;
     player.setOnStatusChange(setVideoStatus);
     player.setOnFpsUpdate(setFps);
+    player.setBeforeReconnect(async () => onStreamLostRef.current?.());
     player.connect(serial);
 
     // Input handler
