@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
+	"net"
 	"os"
 	"strconv"
 )
@@ -11,6 +13,11 @@ type Config struct {
 	// Server
 	Port int
 	Host string
+	// TrustedProxies lists proxy IPs/CIDRs whose X-Forwarded-For is believed
+	// when determining the client IP (rate limiting, audit log). nil trusts
+	// none: the TCP peer address is the client.
+	TrustedProxies []string
+	LogLevel       slog.Level
 
 	// Database
 	DatabaseURL string
@@ -47,6 +54,19 @@ func Load() (*Config, error) {
 
 	if cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("JWT_SECRET environment variable is required")
+	}
+
+	if err := cfg.LogLevel.UnmarshalText([]byte(getEnv("LOG_LEVEL", "info"))); err != nil {
+		return nil, fmt.Errorf("invalid LOG_LEVEL: %w", err)
+	}
+
+	for _, p := range splitAndTrim(getEnv("TRUSTED_PROXIES", "")) {
+		if net.ParseIP(p) == nil {
+			if _, _, err := net.ParseCIDR(p); err != nil {
+				return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q: want an IP or CIDR", p)
+			}
+		}
+		cfg.TrustedProxies = append(cfg.TrustedProxies, p)
 	}
 
 	// Parse allowed origins

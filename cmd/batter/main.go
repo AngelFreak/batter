@@ -17,15 +17,15 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Error("failed to load config", "error", err)
+		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: cfg.LogLevel,
+	}))
 
 	// Connect to database
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -55,13 +55,18 @@ func main() {
 	jwtManager := auth.NewJWTManager(cfg.JWTSecret, cfg.JWTExpirySecs)
 
 	// Set up router
-	router := api.NewRouter(api.RouterConfig{
+	router, err := api.NewRouter(api.RouterConfig{
 		DeviceManager:  dm,
 		DB:             db,
 		JWTManager:     jwtManager,
 		Logger:         logger,
 		AllowedOrigins: cfg.AllowedOrigins,
+		TrustedProxies: cfg.TrustedProxies,
 	})
+	if err != nil {
+		logger.Error("failed to set up router", "error", err)
+		os.Exit(1)
+	}
 
 	// Start session health checker (cleans up dead sessions every 30s)
 	stopHealthCheck := dm.StartHealthChecker(30 * time.Second)

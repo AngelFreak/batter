@@ -24,6 +24,8 @@ services:
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required - run: openssl rand -hex 32}"
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       PORT: "8080"
     depends_on:
       postgres:

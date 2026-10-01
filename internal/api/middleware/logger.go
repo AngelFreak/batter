@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,7 +17,7 @@ func Logger(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
-		query := c.Request.URL.RawQuery
+		query := redactedQuery(c.Request.URL)
 
 		c.Next()
 
@@ -48,4 +49,18 @@ func Logger(logger *slog.Logger) gin.HandlerFunc {
 			logger.Debug("request completed", attrs...)
 		}
 	}
+}
+
+// redactedQuery returns the request's query string with credentials masked.
+// WebSocket clients pass their JWT as ?token=, which must never reach logs.
+func redactedQuery(u *url.URL) string {
+	if u.RawQuery == "" {
+		return ""
+	}
+	q := u.Query()
+	if !q.Has("token") {
+		return u.RawQuery
+	}
+	q.Set("token", "REDACTED")
+	return q.Encode()
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -19,12 +20,20 @@ type RouterConfig struct {
 	JWTManager     *auth.JWTManager
 	Logger         *slog.Logger
 	AllowedOrigins []string
+	// TrustedProxies whose X-Forwarded-For is believed; nil trusts none.
+	TrustedProxies []string
 }
 
 // NewRouter creates and configures the Gin router with all routes.
-func NewRouter(cfg RouterConfig) *gin.Engine {
+func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+
+	// Gin trusts every peer's X-Forwarded-For by default, which would let any
+	// client pick its own IP and dodge the per-IP login rate limit.
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("trusted proxies: %w", err)
+	}
 
 	// Global middleware
 	r.Use(gin.Recovery())
@@ -180,5 +189,5 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		)
 	}
 
-	return r
+	return r, nil
 }

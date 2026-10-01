@@ -49,36 +49,28 @@ func newTestEnv(t *testing.T) *testEnv {
 	if adminURL == "" {
 		t.Skip("BATTER_TEST_DATABASE_URL not set")
 	}
-	if _, err := exec.LookPath("adb"); err != nil {
-		t.Skip("adb not on PATH")
-	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dm := newDeviceManager(t, logger)
 
 	ctx := context.Background()
 	db := createTestDatabase(t, ctx, adminURL)
 	applyMigrations(t, ctx, db)
-
-	scrcpy := filepath.Join(t.TempDir(), "scrcpy-server")
-	if err := os.WriteFile(scrcpy, []byte("stub"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	dm, err := device.NewManager(device.ManagerConfig{ScrcpyServerPath: scrcpy, Logger: logger})
-	if err != nil {
-		t.Fatalf("device manager: %v", err)
-	}
-	t.Cleanup(dm.Shutdown)
 
 	env := &testEnv{
 		db:    db,
 		jwt:   auth.NewJWTManager("test-secret", 3600),
 		users: map[string]string{},
 	}
-	env.router = api.NewRouter(api.RouterConfig{
+	router, err := api.NewRouter(api.RouterConfig{
 		DeviceManager: dm,
 		DB:            db,
 		JWTManager:    env.jwt,
 		Logger:        logger,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.router = router
 
 	for _, u := range []struct{ name, role string }{
 		{"admin", "admin"},
@@ -100,6 +92,25 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	env.seedDevice(t)
 	return env
+}
+
+// newDeviceManager returns a real device manager (NewRouter needs one). It
+// requires adb on PATH; the scrcpy server is a stub since no device is used.
+func newDeviceManager(t *testing.T, logger *slog.Logger) *device.Manager {
+	t.Helper()
+	if _, err := exec.LookPath("adb"); err != nil {
+		t.Skip("adb not on PATH")
+	}
+	scrcpy := filepath.Join(t.TempDir(), "scrcpy-server")
+	if err := os.WriteFile(scrcpy, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dm, err := device.NewManager(device.ManagerConfig{ScrcpyServerPath: scrcpy, Logger: logger})
+	if err != nil {
+		t.Fatalf("device manager: %v", err)
+	}
+	t.Cleanup(dm.Shutdown)
+	return dm
 }
 
 func createTestDatabase(t *testing.T, ctx context.Context, adminURL string) *pgxpool.Pool {
@@ -324,4 +335,69 @@ func TestBatchOpsSkipDevicesCallerCannotAct(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRequestLogsNeverContainWSToken(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	router, err := api.NewRouter(api.RouterConfig{
+		DeviceManager: newDeviceManager(t, logger),
+		JWTManager:    auth.NewJWTManager("test-secret", 3600),
+		Logger:        logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/ws/device/X/video?token=super-secret-jwt&other=1", nil)
+	router.ServeHTTP(httptest.NewRecorder(), req)
+
+	logs := buf.String()
+	if strings.Contains(logs, "super-secret-jwt") {
+		t.Fatalf("token leaked into logs: %s", logs)
+	}
+	if !strings.Contains(logs, "other=1") {
+		t.Fatalf("non-secret query params should still be logged: %s", logs)
+	}
+}
+
+func TestLoginRateLimitKeysOnTrustedClientIP(t *testing.T) {
+	env := newTestEnv(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dm := newDeviceManager(t, logger)
+
+	// httptest requests come from 192.0.2.1. Each attempt claims a different
+	// X-Forwarded-For; returns how many of 11 attempts were rate limited.
+	limited := func(trusted []string) int {
+		router, err := api.NewRouter(api.RouterConfig{
+			DeviceManager: dm, DB: env.db, JWTManager: env.jwt, Logger: logger, TrustedProxies: trusted,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for i := 0; i < 11; i++ {
+			req := httptest.NewRequest("POST", "/api/v1/auth/login",
+				strings.NewReader(`{"username":"nobody","password":"wrong"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", i))
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			if w.Code == http.StatusTooManyRequests {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("untrusted peer cannot dodge the limit by spoofing X-Forwarded-For", func(t *testing.T) {
+		if got := limited(nil); got != 1 {
+			t.Fatalf("%d of 11 attempts limited, want 1", got)
+		}
+	})
+	t.Run("trusted proxy's X-Forwarded-For identifies distinct clients", func(t *testing.T) {
+		if got := limited([]string{"192.0.2.1"}); got != 0 {
+			t.Fatalf("%d of 11 attempts limited, want 0", got)
+		}
+	})
 }
