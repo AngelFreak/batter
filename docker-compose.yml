@@ -19,7 +19,9 @@ services:
   batter:
     build: .
     ports:
-      - "${BATTER_PORT:-3000}:3000"
+      # Plain HTTP stays on this machine; everyone else comes in via caddy
+      # (HTTPS), which browsers require for live video.
+      - "${BATTER_PORT:-127.0.0.1:3000}:3000"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-batter}:${POSTGRES_PASSWORD:-batter}@postgres:5432/${POSTGRES_DB:-batter}?sslmode=disable
       PORT: "8080"
@@ -27,7 +29,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # caddy -> Next.js (in-container) -> backend: believe X-Forwarded-For
+      # from the in-container hop so rate limits see real client IPs.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1}
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,7 +55,22 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  caddy:
+    image: caddy:2.11-alpine
+    # Host networking: listens on the box's :80/:443 directly, so certificates
+    # are issued for the address clients actually use (LAN, NetBird, ...).
+    network_mode: host
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - batter
+    restart: unless-stopped
+
 volumes:
   pgdata:
   batter_data:
   adb_keys:
+  caddy_data:
+  caddy_config:
