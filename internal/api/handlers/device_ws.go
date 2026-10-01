@@ -21,6 +21,9 @@ import (
 const (
 	maxControlMessage     = 1 << 20
 	maxVideoClientMessage = 4 << 10
+	// videoSendQueue bounds unsent video in the kernel per viewer (~0.25s
+	// at 4 Mbps), so lag shows up as blocked writes the session can react to.
+	videoSendQueue = 128 << 10
 )
 
 // DeviceWSHandler handles WebSocket connections for device video/control.
@@ -120,6 +123,7 @@ func (h *DeviceWSHandler) VideoStream(c *gin.Context) {
 	defer session.UnsubscribeVideo(clientID)
 
 	conn.SetReadLimit(maxVideoClientMessage)
+	limitSendQueue(conn.UnderlyingConn(), videoSendQueue)
 	done := make(chan struct{})
 	defer close(done)
 	h.keepAlive(conn, done)

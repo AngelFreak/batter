@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 	"log/slog"
+	"net"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -165,5 +167,61 @@ func TestLargeClipboardStillAccepted(t *testing.T) {
 	_, _, err := conn.ReadMessage()
 	if ne, ok := err.(interface{ Timeout() bool }); !ok || !ne.Timeout() {
 		t.Fatalf("connection not kept open after a large paste: %v", err)
+	}
+}
+
+// A viewer on a slow link must see recent frames, not an ever-growing
+// backlog: it skips ahead to keyframes, and never decodes a delta across a
+// gap.
+func TestSlowVideoClientStaysCurrent(t *testing.T) {
+	t.Setenv("FAKEADB_STREAM_FPS", "60")
+	t.Setenv("FAKEADB_FRAME_BYTES", "20000") // ~1.2 MB/s, far more than the client reads
+	_, base := fakePhoneSession(t, nil)
+	// The far end's buffering (caddy, the browser's link) is bounded by
+	// net.ipv4.tcp_notsent_lowat on the host; model that with a small
+	// receive buffer so only Batter's own queueing is measured.
+	dialer := ws.Dialer{NetDial: func(network, addr string) (net.Conn, error) {
+		c, err := net.Dial(network, addr)
+		if tc, ok := c.(*net.TCPConn); ok {
+			_ = tc.SetReadBuffer(64 << 10)
+		}
+		return c, err
+	}}
+	conn, _, err := dialer.Dial(base+"video", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	start := time.Now()
+	var worst time.Duration
+	var prevSeq uint32
+	prevKey := true
+	frames := 0
+	for time.Since(start) < 5*time.Second {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if len(msg) < 28 || msg[0]&0x80 != 0 { // config packet
+			prevKey = true
+			continue
+		}
+		key := msg[0]&0x40 != 0
+		seq := binary.BigEndian.Uint32(msg[16:])
+		if !key && !prevKey && seq != prevSeq+1 {
+			t.Fatalf("delta %d after %d: decoding across a gap", seq, prevSeq)
+		}
+		prevSeq, prevKey = seq, key
+		frames++
+		if lag := time.Since(time.Unix(0, int64(binary.BigEndian.Uint64(msg[20:])))); time.Since(start) > 2*time.Second && lag > worst {
+			worst = lag
+		}
+		time.Sleep(50 * time.Millisecond) // a slow link: ~20 frames/s at most
+	}
+	t.Logf("slow client: %d frames in 5s, worst lag after warm-up %v", frames, worst)
+	if worst > time.Second {
+		t.Fatalf("slow client is %v behind, want under 1s", worst)
 	}
 }

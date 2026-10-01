@@ -72,7 +72,7 @@ func assertVideoFlows(t *testing.T, s *Session, dev *scrcpytest.Device) {
 	t.Helper()
 	ch := s.SubscribeVideo("video-check")
 	defer s.UnsubscribeVideo("video-check")
-	scrcpytest.WritePacket(t, dev.Video, 1000, []byte{0, 0, 0, 1, 0x65})
+	scrcpytest.WritePacket(t, dev.Video, 1000|1<<62, []byte{0, 0, 0, 1, 0x65}) // an IDR keyframe
 	if got := recv(t, ch, "video"); len(got) != 12+5 {
 		t.Fatalf("video packet = %d bytes, want 17", len(got))
 	}

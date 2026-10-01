@@ -161,6 +161,18 @@ full list. The ones you might touch:
 | `LOG_LEVEL` | `info` | `debug` when troubleshooting. |
 | `ALLOWED_ORIGINS` | same host only | Only if the UI is served from another domain. |
 
+### Remote viewers on slow links
+
+Live video is latency-first: a viewer whose connection can't keep up skips
+ahead to the newest picture instead of falling behind. For that to work over
+slow or relayed links (e.g. NetBird via a relay), also stop the box's kernel
+from queueing seconds of video per connection. Run once on the box (it
+persists across reboots):
+
+```bash
+echo "net.ipv4.tcp_notsent_lowat = 131072" | sudo tee /etc/sysctl.d/90-batter-latency.conf && sudo sysctl -p /etc/sysctl.d/90-batter-latency.conf
+```
+
 ## 9. Troubleshooting
 
 | Problem | Fix |

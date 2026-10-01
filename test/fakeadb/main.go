@@ -7,6 +7,11 @@
 //
 // Full-tier sessions (audio=true) also get an Opus audio stream.
 //
+// With $FAKEADB_STREAM_FPS set it also streams frames at that rate (a
+// keyframe every second, $FAKEADB_FRAME_BYTES each). Each frame's payload
+// is a start code, then its sequence number (uint32) and send time (unix
+// nanoseconds, int64), so tests can check order and latency.
+//
 // State lives in $FAKEADB_DIR (default /tmp/fakeadb).
 package main
 
@@ -18,7 +23,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -115,6 +122,11 @@ func scrcpyServer(args []string) error {
 	if audio != nil {
 		go streamAudio(audio)
 	}
+	var videoMu sync.Mutex
+	if fps, _ := strconv.Atoi(os.Getenv("FAKEADB_STREAM_FPS")); fps > 0 {
+		size, _ := strconv.Atoi(os.Getenv("FAKEADB_FRAME_BYTES"))
+		go stream(video, &videoMu, fps, max(size, 16))
+	}
 	buf := make([]byte, 256)
 	for {
 		n, err := control.Read(buf)
@@ -132,10 +144,13 @@ func scrcpyServer(args []string) error {
 				fmt.Fprintln(f, "reset")
 				f.Close()
 			}
-			if err := writePacket(video, 1<<63, []byte{0, 0, 0, 1, 0x67, 0x42}); err != nil { // config
-				return err
+			videoMu.Lock()
+			err := writePacket(video, 1<<63, []byte{0, 0, 0, 1, 0x67, 0x42}) // config
+			if err == nil {
+				err = writePacket(video, 1<<62, frame(0, 16)) // keyframe
 			}
-			if err := writePacket(video, 1<<62, []byte{0, 0, 0, 1, 0x65, 0x88}); err != nil { // keyframe
+			videoMu.Unlock()
+			if err != nil {
 				return err
 			}
 		}
@@ -148,6 +163,32 @@ func writePacket(w io.Writer, flags uint64, payload []byte) error {
 	binary.BigEndian.PutUint32(header[8:], uint32(len(payload)))
 	_, err := w.Write(append(header, payload...))
 	return err
+}
+
+func frame(seq uint32, size int) []byte {
+	p := make([]byte, size)
+	copy(p, []byte{0, 0, 0, 1})
+	binary.BigEndian.PutUint32(p[4:], seq)
+	binary.BigEndian.PutUint64(p[8:], uint64(time.Now().UnixNano()))
+	return p
+}
+
+func stream(video net.Conn, mu *sync.Mutex, fps, size int) {
+	ticker := time.NewTicker(time.Second / time.Duration(fps))
+	defer ticker.Stop()
+	for seq := uint32(1); ; seq++ {
+		<-ticker.C
+		var flags uint64
+		if seq%uint32(fps) == 0 {
+			flags = 1 << 62
+		}
+		mu.Lock()
+		err := writePacket(video, flags, frame(seq, size))
+		mu.Unlock()
+		if err != nil {
+			return
+		}
+	}
 }
 
 // streamAudio sends the Opus codec ID, a config packet, then a 20ms packet

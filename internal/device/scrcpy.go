@@ -64,7 +64,7 @@ type Session struct {
 	videoPort   int
 
 	// Video subscribers: id -> channel
-	videoSubscribers map[string]chan []byte
+	videoSubscribers map[string]*videoSub
 	subscribersMu    sync.RWMutex
 
 	// Control ownership: only one client can send input at a time
@@ -113,7 +113,7 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 	s := &Session{
 		Serial:           serial,
 		SCID:             scid,
-		videoSubscribers: make(map[string]chan []byte),
+		videoSubscribers: make(map[string]*videoSub),
 		audioSubscribers: make(map[string]chan []byte),
 		audioReady:       make(chan struct{}),
 		audioDone:        make(chan struct{}),
@@ -340,29 +340,19 @@ func (s *Session) videoReadLoop(ctx context.Context, adb *ADB, serial string, ab
 		copy(msg, headerBuf)
 		copy(msg[12:], naluData)
 
-		// Broadcast to all subscribers
-		s.subscribersMu.RLock()
-		for _, ch := range s.videoSubscribers {
-			select {
-			case ch <- msg:
-			default:
-				// Drop frame if subscriber is slow
-			}
-		}
-		s.subscribersMu.RUnlock()
+		s.broadcast(msg)
 	}
 }
 
 // SubscribeVideo creates a new video subscription. Returns a channel that receives
 // raw video packets (12-byte header + H.264 NALU data).
-func (s *Session) SubscribeVideo(id string) chan []byte {
-	ch := make(chan []byte, 60) // buffer ~1 second at 60fps
-
+// A viewer that falls behind skips to the next keyframe (see videosub.go).
+func (s *Session) SubscribeVideo(id string) <-chan []byte {
+	sub := newVideoSub()
 	s.subscribersMu.Lock()
-	s.videoSubscribers[id] = ch
+	s.videoSubscribers[id] = sub
 	s.subscribersMu.Unlock()
-
-	return ch
+	return sub.ch
 }
 
 // GetConfigPacket returns the stored SPS/PPS config packet, if available.
@@ -380,8 +370,8 @@ func (s *Session) GetConfigPacket() []byte {
 // UnsubscribeVideo removes a video subscription.
 func (s *Session) UnsubscribeVideo(id string) {
 	s.subscribersMu.Lock()
-	if ch, ok := s.videoSubscribers[id]; ok {
-		close(ch)
+	if sub, ok := s.videoSubscribers[id]; ok {
+		close(sub.ch)
 		delete(s.videoSubscribers, id)
 	}
 	s.subscribersMu.Unlock()
@@ -491,8 +481,8 @@ func (s *Session) Close() {
 
 	// Close all subscriber channels
 	s.subscribersMu.Lock()
-	for id, ch := range s.videoSubscribers {
-		close(ch)
+	for id, sub := range s.videoSubscribers {
+		close(sub.ch)
 		delete(s.videoSubscribers, id)
 	}
 	s.subscribersMu.Unlock()
