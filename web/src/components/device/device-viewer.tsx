@@ -21,7 +21,7 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
   const [controlStatus, setControlStatus] = useState('connecting');
   const [fps, setFps] = useState(0);
   const [capturing, setCapturing] = useState(false);
-  const [showFrame, setShowFrame] = useState(false);
+  const [showFrame, setShowFrame] = useState(true);
   const [showTextInput, setShowTextInput] = useState(false);
   const [textValue, setTextValue] = useState('');
   const [toast, setToast] = useState<string | null>(null);
