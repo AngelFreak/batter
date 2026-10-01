@@ -1,46 +1,63 @@
 // Package lanit is a Docker integration test of the phone network: the real
-// Batter image and the compose files as shipped (docker-compose.yml plus
-// docker-compose.lan.yml: macvlan phone network, gw_priority, PHONE_LAN),
-// with stand-in phones on that network and two throwaway WireGuard "VPN
-// providers" out on the "internet".
+// Batter image with the compose file as shipped (pid: host), stand-in phones
+// on a stand-in switch, and two throwaway WireGuard "VPN providers" out on
+// the "internet". The phone network's port is chosen through the API, as an
+// admin does in the UI.
 //
-// Topology. The stack runs in a docker-in-docker container, which plays
-// the box (lungo): its uplink is this test's network, where the VPN
-// servers, an IP echo server ("the internet") and another host ("the
-// box's LAN behind NIC1") live. The phone network's macvlan parent is a
-// dummy interface inside the box, standing in for NIC2: macvlan in bridge
-// mode switches between its sub-interfaces as the real switch would, and
-// the box itself has no address there (as NIC2 must not). Each phone is
-// an alpine container on that network that drops Docker's address, gets
-// one from Batter with busybox udhcpc, and listens on adb's port 5555.
+// Topology. The stack runs in a docker-in-docker container that plays the
+// box (lungo): its uplink is this test's network, where the VPN servers, an
+// IP echo server ("the internet") and another host ("the box's LAN behind
+// NIC1") live. Inside the box a bridge is the phones' switch. The box's
+// candidate phone-network ports (nic2, nic3) are veth pairs whose other end
+// is a switch port, so the box reaches the switch exactly as a NIC plugged
+// into it would: phones on the switch can reach the box's NIC (its IPv6
+// link-local address, broadcasts, multicast) unless Batter takes it. Each
+// phone is a container whose eth0 is a veth end on the switch; it gets an
+// address from Batter with busybox udhcpc and listens on adb's port 5555.
+// The box runs stand-ins for sshd and Caddy (:22, :443 on :: and 0.0.0.0)
+// and logs UDP broadcast/multicast it receives. Veths stand in for
+// physical NICs (BATTER_LAN_ALLOW_VETH=1 lets Batter offer them); unlike a
+// physical NIC a veth is destroyed, not returned to the box, when Batter's
+// container stops, so a restart is followed by a re-plug here.
 //
-// It proves, through the real firewall, routing, DHCP server and API:
+// It proves, through the real HostNet/nsenter path, firewall, routing, DHCP
+// server and API:
 //
-//   - the container starts with forwarding off and Batter turns it on only
-//     with the firewall in;
-//   - phones get sticky leases from Batter (gateway and DNS = Batter);
-//   - a phone is identified over adb and bound to its lease (adb is the
-//     fake phone; its TCP side is the stand-in's port 5555);
-//   - a phone without a profile reaches nothing; each phone with one exits
-//     through its own profile's server, and its DNS answers come from that
-//     server (a resolver only reachable through the tunnel);
-//   - phones reach neither Batter (:8080/:3000, on any address), Postgres,
-//     the box (its dockerd on :2375, on every address it has), nor the
-//     box's LAN, nor the internet directly: the VPN servers forward only to
-//     the echo server, so anything else a phone reaches is a leak. Each of
-//     these checks has a control showing the target is up;
-//   - Batter's own connections to a phone (adb's port) work;
-//   - switching a phone's profile takes effect at once (exit IP and DNS);
-//   - a tunnel going down, or the routing being wiped, blocks its phones
-//     (and only them) instead of leaking;
-//   - all of it holds after Batter restarts.
+//   - off is a no-op: the box's links, addresses, rules, routes, nft and
+//     sysctls don't change, and phones get nothing;
+//   - the box-reachability probes work: with nic2 up on the box (as the old
+//     macvlan design left it, or a box that manages the port), phones reach
+//     the box's :22 over link-local IPv6 and the box hears their broadcast
+//     and multicast;
+//   - unusable ports (the box's own uplink, a port with addresses) are
+//     refused;
+//   - on then off restores the box exactly (normalized snapshot);
+//   - with the port taken, nothing on the switch reaches the box on any
+//     protocol, Batter has no IPv6 on it, and the container's forwarding was
+//     off until then;
+//   - phones get sticky leases with Batter as gateway and DNS; the switch's
+//     own management interface gets a lease but nothing else and is listed
+//     as a non-phone client, never as a device;
+//   - adb identifies a phone and binds its lease; each phone exits (and
+//     resolves) through its own profile; no phone reaches Batter, Postgres,
+//     the box's dockerd, the box's LAN or the internet directly (each target
+//     has a control showing it's up); Batter's connections to a phone's
+//     5555 work; profile switches and removals apply at once;
+//   - switching the port to nic3 gives nic2 back to the box down and phones
+//     keep working; a re-plugged port (same MAC) is taken again;
+//   - a downed tunnel or wiped routing blocks only that phone;
+//   - after a restart Batter takes the port again and all checks hold;
+//   - turning the network off gives the port back down and leaves no table,
+//     rule or forwarding in Batter.
 //
-// It needs Docker with kernel WireGuard, macvlan and nf_tables, and runs
-// only when asked:
+// It needs Docker with kernel WireGuard and nf_tables, and runs only when
+// asked:
 //
 //	BATTER_DOCKER_IT=1 go test ./test/lanit/ -v -timeout 60m
 //
-// BATTER_IMAGE=<tag> skips building the image from this checkout.
+// BATTER_IMAGE=<tag> skips building the image from this checkout. Every
+// Docker resource it creates carries a per-run suffix and only those are
+// removed afterwards.
 package lanit
 
 import (
@@ -56,6 +73,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -65,18 +83,54 @@ import (
 )
 
 const (
-	prefix    = "batter-lanit"
-	network   = prefix + "-net"
-	dind      = prefix + "-dind"
-	echo      = prefix + "-echo"
-	lanHost   = prefix + "-lanhost"
-	wgA       = prefix + "-wg-a"
-	wgB       = prefix + "-wg-b"
 	batterLAN = "10.77.0.1"
 	// What each VPN provider's resolver answers for probe.test.
 	dnsA = "192.0.2.1"
 	dnsB = "192.0.2.2"
+	// The box's candidate phone-network ports.
+	mac2 = "02:00:00:00:77:02"
+	mac3 = "02:00:00:00:77:03"
+	mac4 = "02:00:00:00:77:04"
 )
+
+// The box's setup: tools, IPv6 on (Docker turns it off in containers; a
+// real box has it), the switch, three candidate ports (nic4 addressed, so
+// unusable), and stand-ins for the box's services.
+const boxSetup = `set -e
+apk add -q --no-cache iproute2 socat >/dev/null
+sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0
+ip link add phonesw type bridge
+sysctl -qw net.ipv6.conf.phonesw.disable_ipv6=1
+ip link set phonesw up
+plug() { ip link add "$1" address "$2" type veth peer name "sw-$1"; ip link set "sw-$1" master phonesw; sysctl -qw "net.ipv6.conf.sw-$1.disable_ipv6=1"; ip link set "sw-$1" up; }
+plug nic2 ` + mac2 + `
+plug nic3 ` + mac3 + `
+plug nic4 ` + mac4 + `
+ip address add 192.168.99.1/24 dev nic4
+for p in 22 443; do socat TCP6-LISTEN:$p,fork,reuseaddr,ipv6only=0 SYSTEM:'echo BOX' & done
+socat -u UDP4-RECVFROM:9999,broadcast,fork,reuseaddr OPEN:/tmp/box-heard,creat,append &
+socat -u UDP6-RECVFROM:9999,fork,reuseaddr,ipv6only=1 OPEN:/tmp/box-heard,creat,append &
+sleep 1
+`
+
+// replug re-creates a port's veth (same MAC), as re-plugging a USB NIC.
+func replugCmd(name, mac string) string {
+	return fmt.Sprintf(`ip link del sw-%[1]s 2>/dev/null; ip link add %[1]s address %[2]s type veth peer name sw-%[1]s && `+
+		`ip link set sw-%[1]s master phonesw && sysctl -qw net.ipv6.conf.sw-%[1]s.disable_ipv6=1 && ip link set sw-%[1]s up`, name, mac)
+}
+
+// The box's networking as compared before and after: interface indexes and
+// peer references are stripped (a returned NIC keeps its index, but veth
+// peer annotations depend on where the peer is).
+const snapshotCmd = `ip -d link show; ip -d addr show; ip rule show; ip -6 rule show; ` +
+	`ip route show table all; ip -6 route show table all; nft list ruleset; ` +
+	`sysctl -a 2>/dev/null | grep -E '^net\.(ipv4\.(ip_forward|conf\.)|ipv6\.conf\.)' | grep -v 'stable_secret'`
+
+// snapshotNoise is what the kernel changes by itself, not configuration:
+// veth peer references, bridge timers and learning counters, the qdisc a
+// NIC gets the first time it's up (noop until then), and a down switch
+// port's DOWN vs LOWERLAYERDOWN (which depends on where its peer is).
+var snapshotNoise = regexp.MustCompile(`@if\d+|link-netnsid \d+|(gc|hello|tcn|topology_change|forward_delay|message_age|hold)_timer\s+[\d.]+|fdb_n_learned \d+|qdisc \S+|state LOWERLAYERDOWN`)
 
 func TestPhonesOnTheLAN(t *testing.T) {
 	if os.Getenv("BATTER_DOCKER_IT") != "1" {
@@ -93,28 +147,42 @@ func TestPhonesOnTheLAN(t *testing.T) {
 		run(t, 60*time.Minute, "docker", "build", "-q", "-t", image, repo)
 	}
 
+	// Every resource this run creates, by exact name, for cleanup.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000_000)
+	name := func(s string) string { return "batter-lanit-" + suffix + "-" + s }
+	network := name("net")
+	var containers []string
+	dind := name("box")
 	t.Cleanup(func() {
 		if t.Failed() {
-			out, _ := runErr(time.Minute, "docker", "exec", "-w", "/stack", "-e", "PHONE_LAN_PARENT=phonesw", dind,
-				"docker", "compose", "-p", "batter", "-f", "docker-compose.yml", "-f", "docker-compose.lan.yml",
-				"-f", "it.yml", "logs", "--no-color", "--tail", "120", "batter")
+			out, _ := runErr(time.Minute, "docker", "exec", "-w", "/stack", dind,
+				"docker", "compose", "-p", "batter", "-f", "docker-compose.yml", "-f", "it.yml",
+				"logs", "--no-color", "--tail", "150", "batter")
 			t.Logf("batter logs:\n%s", out)
 		}
 		if os.Getenv("BATTER_IT_KEEP") == "1" {
+			t.Logf("kept: %v, network %s", containers, network)
 			return
 		}
-		_, _ = runErr(2*time.Minute, "docker", "rm", "-f", "-v", dind, echo, lanHost, wgA, wgB)
+		if len(containers) > 0 {
+			_, _ = runErr(2*time.Minute, "docker", append([]string{"rm", "-f", "-v"}, containers...)...)
+		}
 		_, _ = runErr(time.Minute, "docker", "network", "rm", network)
 	})
 	run(t, time.Minute, "docker", "network", "create", network)
+	start := func(n string, args ...string) {
+		t.Helper()
+		containers = append(containers, n)
+		run(t, time.Minute, "docker", append([]string{"run", "-d", "--name", n, "--network", network}, args...)...)
+	}
 
 	// The internet: an IP echo server, two VPN providers that forward to it
 	// only, and another host on the box's LAN.
-	run(t, time.Minute, "docker", "run", "-d", "--name", echo, "--network", network, "--network-alias", "echo",
+	echo, lanHost, wgA, wgB := name("echo"), name("lanhost"), name("wg-a"), name("wg-b")
+	start(echo, "--network-alias", "echo",
 		"-v", filepath.Join(repo, "test", "vpnit", "echo-ip.cgi")+":/www/cgi-bin/ip:ro",
 		"busybox:1.36-musl", "httpd", "-f", "-p", "80", "-h", "/www")
-	run(t, time.Minute, "docker", "run", "-d", "--name", lanHost, "--network", network,
-		"busybox:1.36-musl", "httpd", "-f", "-p", "80", "-h", "/tmp")
+	start(lanHost, "busybox:1.36-musl", "httpd", "-f", "-p", "80", "-h", "/tmp")
 	serverKeyA, serverPubA := keypair(t)
 	clientKeyA, clientPubA := keypair(t)
 	serverKeyB, serverPubB := keypair(t)
@@ -123,37 +191,41 @@ func TestPhonesOnTheLAN(t *testing.T) {
 		{wgA, serverKeyA, clientPubA, "10.99.0", dnsA},
 		{wgB, serverKeyB, clientPubB, "10.98.0", dnsB},
 	} {
-		run(t, time.Minute, "docker", "run", "-d", "--privileged", "--name", s.name, "--network", network,
+		start(s.name, "--privileged",
 			"-e", "SERVER_KEY="+s.key, "-e", "CLIENT_PUB="+s.clientPub, "-e", "SUBNET="+s.subnet,
 			"-e", "DNS_ANSWER="+s.answer, "-e", "ONLY_TO=echo",
 			"-v", filepath.Join(repo, "test", "vpnit", "wgserver.sh")+":/wgserver.sh:ro",
 			"alpine:3.20", "sh", "/wgserver.sh")
 	}
-	for _, name := range []string{wgA, wgB} {
-		waitFor(t, 2*time.Minute, name+" ready", func() bool {
-			_, err := runErr(10*time.Second, "docker", "exec", name, "test", "-f", "/ready")
+	for _, n := range []string{wgA, wgB} {
+		waitFor(t, 2*time.Minute, n+" ready", func() bool {
+			_, err := runErr(10*time.Second, "docker", "exec", n, "test", "-f", "/ready")
 			return err == nil
 		})
 	}
-	echoIP := containerIP(t, echo)
-	ipA, ipB := containerIP(t, wgA), containerIP(t, wgB)
-	lanHostIP := containerIP(t, lanHost)
+	echoIP := containerIP(t, network, echo)
+	ipA, ipB := containerIP(t, network, wgA), containerIP(t, network, wgB)
+	lanHostIP := containerIP(t, network, lanHost)
 
-	// The box, with NIC2 (a dummy: no address, nothing else on it).
-	run(t, time.Minute, "docker", "run", "-d", "--privileged", "--name", dind, "--network", network,
-		"-e", "DOCKER_TLS_CERTDIR=", "docker:29-dind")
+	// The box.
+	start(dind, "--privileged", "-e", "DOCKER_TLS_CERTDIR=", "docker:29-dind")
 	waitFor(t, 2*time.Minute, "dind docker", func() bool {
 		_, err := runErr(10*time.Second, "docker", "exec", dind, "docker", "info")
 		return err == nil
 	})
-	run(t, time.Minute, "docker", "exec", dind, "sh", "-c", "ip link add phonesw type dummy && ip link set phonesw up")
+	box := func(timeout time.Duration, args ...string) (string, error) {
+		return runErr(timeout, "docker", append([]string{"exec", dind}, args...)...)
+	}
+	boxSh := func(script string) (string, error) { return box(5*time.Minute, "sh", "-c", script) }
+	if out, err := box(5*time.Minute, "sh", "-c", boxSetup+"echo ok"); err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("box setup: %v\n%s", err, out)
+	}
 	run(t, 20*time.Minute, "sh", "-c",
 		"docker save "+image+" postgres:16-alpine alpine:3.20 | docker exec -i "+dind+" docker load")
-	boxIP := containerIP(t, dind)
+	boxIP := containerIP(t, network, dind)
 
 	stack := t.TempDir()
 	copyFile(t, filepath.Join(repo, "docker-compose.yml"), filepath.Join(stack, "docker-compose.yml"))
-	copyFile(t, filepath.Join(repo, "docker-compose.lan.yml"), filepath.Join(stack, "docker-compose.lan.yml"))
 	for _, f := range []string{"phone.sh", "udhcpc.sh", "banner.sh"} {
 		copyFile(t, filepath.Join(dir, f), filepath.Join(stack, "phone", f))
 	}
@@ -163,8 +235,8 @@ func TestPhonesOnTheLAN(t *testing.T) {
 		t.Fatalf("build fakeadb: %v\n%s", err, out)
 	}
 	// As shipped, except: the prebuilt image, the API published for this
-	// test, the fake phone instead of USB, and the echo server for the
-	// exit-IP check.
+	// test, the fake phone instead of USB, the echo server for the exit-IP
+	// check, and veths allowed to stand in for physical NICs.
 	override := `services:
   batter:
     image: ` + image + `
@@ -177,20 +249,15 @@ func TestPhonesOnTheLAN(t *testing.T) {
       - ./adb:/usr/bin/adb:ro
     environment:
       VPN_EXIT_IP_URL: http://` + echoIP + `/cgi-bin/ip
+      BATTER_LAN_ALLOW_VETH: "1"
 `
 	if err := os.WriteFile(filepath.Join(stack, "it.yml"), []byte(override), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	run(t, time.Minute, "docker", "cp", stack+"/.", dind+":/stack")
-	box := func(timeout time.Duration, args ...string) (string, error) {
-		return runErr(timeout, "docker", append([]string{"exec", dind}, args...)...)
-	}
 	compose := func(timeout time.Duration, args ...string) (string, error) {
-		return runErr(timeout, "docker", append([]string{"exec", "-w", "/stack", "-e", "PHONE_LAN_PARENT=phonesw", dind,
-			"docker", "compose", "-p", "batter", "-f", "docker-compose.yml", "-f", "docker-compose.lan.yml", "-f", "it.yml"}, args...)...)
-	}
-	if out, err := compose(10*time.Minute, "up", "-d", "--wait", "batter"); err != nil {
-		t.Fatalf("compose up: %v\n%s", err, out)
+		return runErr(timeout, "docker", append([]string{"exec", "-w", "/stack", dind,
+			"docker", "compose", "-p", "batter", "-f", "docker-compose.yml", "-f", "it.yml"}, args...)...)
 	}
 	inBatter := func(args ...string) (string, error) {
 		return compose(time.Minute, append([]string{"exec", "-T", "batter"}, args...)...)
@@ -199,17 +266,32 @@ func TestPhonesOnTheLAN(t *testing.T) {
 		return box(time.Minute, append([]string{"docker", "exec", phone}, args...)...)
 	}
 
+	// Phones (and the switch's management interface) on the switch, before
+	// Batter starts.
+	for _, p := range []struct{ name, hostname string }{{"phone1", ""}, {"phone2", ""}, {"switchmgmt", "usw-flex-mini"}} {
+		args := []string{"docker", "run", "-d", "--name", p.name, "--network", "none", "--cap-add", "NET_ADMIN",
+			"--sysctl", "net.ipv6.conf.all.disable_ipv6=0", "--sysctl", "net.ipv6.conf.default.disable_ipv6=0",
+			"-v", "/stack/phone:/phone:ro"}
+		if p.hostname != "" {
+			args = append(args, "-e", "DHCP_HOSTNAME="+p.hostname)
+		}
+		if out, err := box(time.Minute, append(args, "alpine:3.20", "sh", "/phone/phone.sh")...); err != nil {
+			t.Fatalf("start %s: %v %s", p.name, err, out)
+		}
+		script := fmt.Sprintf(`pid=$(docker inspect -f '{{.State.Pid}}' %[1]s) && ip link add p-%[1]s type veth peer name sw-p-%[1]s && `+
+			`ip link set p-%[1]s netns $pid name eth0 && ip link set sw-p-%[1]s master phonesw && `+
+			`sysctl -qw net.ipv6.conf.sw-p-%[1]s.disable_ipv6=1 && ip link set sw-p-%[1]s up`, p.name)
+		if out, err := boxSh(script); err != nil {
+			t.Fatalf("plug %s into the switch: %v %s", p.name, err, out)
+		}
+	}
+
+	if out, err := compose(10*time.Minute, "up", "-d", "--wait", "batter"); err != nil {
+		t.Fatalf("compose up: %v\n%s", err, out)
+	}
 	api := &api{base: "http://" + boxIP + ":8080"}
 	api.waitHealthy(t)
 	api.login(t)
-
-	// Phones on the phone network, as Docker attaches them.
-	for _, p := range []string{"phone1", "phone2"} {
-		if out, err := box(time.Minute, "docker", "run", "-d", "--name", p, "--network", "batter_phones",
-			"--cap-add", "NET_ADMIN", "-v", "/stack/phone:/phone:ro", "alpine:3.20", "sh", "/phone/phone.sh"); err != nil {
-			t.Fatalf("start %s: %v %s", p, err, out)
-		}
-	}
 
 	// Probes.
 	phoneTCP := func(phone, host string, port int) bool {
@@ -240,7 +322,7 @@ func TestPhonesOnTheLAN(t *testing.T) {
 	}
 	mustExit := func(t *testing.T, phone, want, what string) {
 		t.Helper()
-		eventually(t, 20*time.Second, func() error {
+		eventually(t, 60*time.Second, func() error {
 			ip, err := exitIP(phone)
 			if err != nil {
 				return fmt.Errorf("%s (%s): no internet: %v", phone, what, err)
@@ -273,28 +355,224 @@ func TestPhonesOnTheLAN(t *testing.T) {
 			t.Fatalf("%s resolved a name (%s) with %s", phone, a, why)
 		}
 	}
+	snapshot := func(t *testing.T) string {
+		t.Helper()
+		out, err := boxSh(snapshotCmd)
+		if err != nil {
+			t.Fatalf("snapshot: %v %s", err, out)
+		}
+		return snapshotNoise.ReplaceAllStringFunc(out, func(m string) string {
+			if m == "state LOWERLAYERDOWN" {
+				return "state DOWN"
+			}
+			return ""
+		})
+	}
+	// sameBox compares snapshots as multisets of lines: listing order (of
+	// links, say) isn't state.
+	sameBox := func(t *testing.T, before, after, what string) {
+		t.Helper()
+		count := func(snap string) map[string]int {
+			m := map[string]int{}
+			for _, l := range strings.Split(snap, "\n") {
+				m[strings.TrimSpace(l)]++
+			}
+			return m
+		}
+		b, a := count(before), count(after)
+		var diff []string
+		for l, n := range a {
+			if b[l] != n {
+				diff = append(diff, fmt.Sprintf("+%d/-%d %s", n, b[l], l))
+			}
+		}
+		for l, n := range b {
+			if _, ok := a[l]; !ok {
+				diff = append(diff, fmt.Sprintf("-%d %s", n, l))
+			}
+		}
+		if len(diff) > 0 {
+			t.Fatalf("%s changed the box:\n%s", what, strings.Join(diff, "\n"))
+		}
+	}
+	status := func(t *testing.T) string {
+		t.Helper()
+		_, body := api.do(t, "GET", "/api/v1/phone-network", nil)
+		return body
+	}
+	waitState := func(t *testing.T, state string) {
+		t.Helper()
+		eventually(t, 60*time.Second, func() error {
+			if st := status(t); !strings.Contains(st, `"state":"`+state+`"`) {
+				return fmt.Errorf("phone network not %s: %s", state, st)
+			}
+			return nil
+		})
+	}
+	setPort := func(t *testing.T, mac string) string {
+		t.Helper()
+		var body any = map[string]any{"mac": nil}
+		if mac != "" {
+			body = map[string]any{"mac": mac}
+		}
+		return api.must(t, "PUT", "/api/v1/phone-network", body, http.StatusOK)
+	}
+	onBox := func(nic string) (state string, present bool) {
+		out, err := box(time.Minute, "ip", "-br", "link", "show", "dev", nic)
+		if err != nil {
+			return "", false
+		}
+		f := strings.Fields(out)
+		if len(f) < 2 {
+			return "", true
+		}
+		return f[1], true
+	}
+	// boxHears reports whether the box's stand-in services were reached
+	// from phone: TCP to the box's link-local address (sshd, Caddy), and
+	// UDP broadcast and multicast discovery.
+	var nic2LL string
+	boxHears := func(t *testing.T, phone string) []string {
+		t.Helper()
+		if _, err := boxSh(": > /tmp/box-heard"); err != nil {
+			t.Fatal(err)
+		}
+		var reached []string
+		for _, port := range []int{22, 443} {
+			if phoneTCP(phone, nic2LL+"%eth0", port) {
+				reached = append(reached, fmt.Sprintf("tcp [%s]:%d", nic2LL, port))
+			}
+		}
+		// IPv4 broadcast to the phone's subnet(s) and to 255.255.255.255,
+		// IPv6 multicast to all nodes.
+		_, _ = inPhone(phone, "sh", "-c", `for a in $(ip -4 -o addr show dev eth0 | awk '{print $4}'); do `+
+			`eval $(ipcalc -b "$a"); echo hello4 | nc -u -b -w 1 "$BROADCAST" 9999; done; `+
+			`echo hello4 | nc -u -b -w 1 255.255.255.255 9999; echo hello6 | nc -u -w 1 ff02::1%eth0 9999`)
+		time.Sleep(time.Second)
+		heard, _ := box(time.Minute, "cat", "/tmp/box-heard")
+		for _, h := range []string{"hello4", "hello6"} {
+			if strings.Contains(heard, h) {
+				reached = append(reached, "udp "+map[string]string{"hello4": "broadcast", "hello6": "multicast"}[h])
+			}
+		}
+		return reached
+	}
 
-	var phone1IP, phone2IP string
-	step(t, "forwarding starts off and Batter turns it on once fenced", func(t *testing.T) {
-		out, err := box(time.Minute, "docker", "inspect", "-f", "{{index .HostConfig.Sysctls \"net.ipv4.ip_forward\"}}", "batter-batter-1")
-		if err != nil || strings.TrimSpace(out) != "0" {
-			t.Fatalf("container not started with forwarding off: %q %v", out, err)
+	var phone1IP, phone2IP, mgmtIP string
+	step(t, "off: the box is untouched and phones get nothing", func(t *testing.T) {
+		if st := status(t); !strings.Contains(st, `"state":"off"`) {
+			t.Fatalf("status %s", st)
 		}
-		if out, _ := inBatter("sysctl", "-n", "net.ipv4.ip_forward"); strings.TrimSpace(out) != "1" {
-			t.Fatalf("Batter didn't turn forwarding on: %q", out)
+		before := snapshot(t)
+		time.Sleep(12 * time.Second) // two of Batter's passes
+		sameBox(t, before, snapshot(t), "Batter with the phone network off")
+		for _, p := range []string{"phone1", "phone2", "switchmgmt"} {
+			if out, err := inPhone(p, "cat", "/tmp/ip"); err == nil {
+				t.Fatalf("%s got an address (%s) with the phone network off", p, out)
+			}
 		}
-		if out, err := inBatter("nft", "list", "chain", "inet", "batter_lan", "forward"); err != nil || !strings.Contains(out, "drop") {
-			t.Fatalf("no LAN firewall: %v %s", err, out)
+		if out, err := inBatter("nft", "list", "table", "inet", "batter_lan"); err == nil {
+			t.Fatalf("phone network firewall installed while off:\n%s", out)
+		}
+		if out, _ := inBatter("sysctl", "-n", "net.ipv4.ip_forward"); strings.TrimSpace(out) != "0" {
+			t.Fatalf("forwarding on while off: %q", out)
 		}
 	})
 
-	step(t, "phones get sticky leases from Batter", func(t *testing.T) {
+	step(t, "a box port on the switch is reachable from phones (what Batter must prevent)", func(t *testing.T) {
+		// nic2 up on the box: the old macvlan design's parent, or a box
+		// whose NetworkManager manages the port (with an IPv4 link-local
+		// address, as avahi-autoipd or a DHCP fallback would add; phone1 gets
+		// one too, so it can send IPv4 broadcasts before any lease).
+		if out, err := boxSh("ip address add 169.254.7.1/16 dev nic2 && ip link set nic2 up"); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+		if out, err := inPhone("phone1", "ip", "address", "add", "169.254.7.7/16", "dev", "eth0"); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+		eventually(t, 20*time.Second, func() error {
+			out, _ := box(time.Minute, "sh", "-c", "ip -6 -o addr show dev nic2 scope link | grep -v tentative | awk '{print $4}' | cut -d/ -f1")
+			if nic2LL = strings.TrimSpace(out); nic2LL == "" {
+				return fmt.Errorf("nic2 has no link-local address yet")
+			}
+			return nil
+		})
+		eventually(t, 20*time.Second, func() error {
+			if reached := boxHears(t, "phone1"); len(reached) != 4 {
+				return fmt.Errorf("with nic2 up on the box, phone1 reached only %v (want TCP :22, :443, broadcast, multicast); the probes can't see a leak", reached)
+			}
+			return nil
+		})
+		if out, err := inPhone("phone1", "ip", "address", "del", "169.254.7.7/16", "dev", "eth0"); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+		if out, err := boxSh("ip address del 169.254.7.1/16 dev nic2 && ip link set nic2 down"); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	})
+
+	step(t, "ports the box uses are refused", func(t *testing.T) {
+		body := api.must(t, "GET", "/api/v1/phone-network/interfaces", nil, http.StatusOK)
+		var list struct {
+			Interfaces []struct {
+				Name, MAC, Reason string
+				Usable            bool
+			} `json:"interfaces"`
+		}
+		if err := json.Unmarshal([]byte(body), &list); err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		macs := map[string]string{}
+		for _, n := range list.Interfaces {
+			got[n.Name] = n.Reason
+			macs[n.Name] = n.MAC
+			if n.Usable {
+				got[n.Name] = "usable"
+			}
+		}
+		for nic, want := range map[string]string{"nic2": "usable", "nic3": "usable", "nic4": "addresses", "eth0": "default route"} {
+			if !strings.Contains(got[nic], want) {
+				t.Errorf("%s: %q, want %q (list: %s)", nic, got[nic], want, body)
+			}
+		}
+		for _, nic := range []string{"eth0", "nic4"} {
+			if code, out := api.do(t, "PUT", "/api/v1/phone-network", map[string]any{"mac": macs[nic]}); code != http.StatusBadRequest {
+				t.Errorf("choosing %s: %d %s, want 400", nic, code, out)
+			}
+		}
+		if st := status(t); !strings.Contains(st, `"state":"off"`) {
+			t.Fatalf("refused choice changed the state: %s", st)
+		}
+	})
+
+	step(t, "on then off restores the box exactly", func(t *testing.T) {
+		before := snapshot(t)
+		if st := setPort(t, mac2); !strings.Contains(st, `"state":"active"`) {
+			t.Fatalf("on: %s", st)
+		}
+		if _, present := onBox("nic2"); present {
+			t.Fatal("nic2 still on the box with the phone network on")
+		}
+		if st := setPort(t, ""); !strings.Contains(st, `"state":"off"`) {
+			t.Fatalf("off: %s", st)
+		}
+		if state, present := onBox("nic2"); !present || state != "DOWN" {
+			t.Fatalf("nic2 after off: present=%v state=%q, want back on the box, DOWN", present, state)
+		}
+		sameBox(t, before, snapshot(t), "turning the phone network on and off")
+	})
+
+	step(t, "with the port taken, phones get leases and nothing on the switch reaches the box", func(t *testing.T) {
+		if st := setPort(t, mac2); !strings.Contains(st, `"state":"active"`) {
+			t.Fatalf("on: %s", st)
+		}
 		pool := netip.MustParsePrefix("10.77.0.0/24")
 		for _, p := range []struct {
 			name string
 			ip   *string
-		}{{"phone1", &phone1IP}, {"phone2", &phone2IP}} {
-			eventually(t, time.Minute, func() error {
+		}{{"phone1", &phone1IP}, {"phone2", &phone2IP}, {"switchmgmt", &mgmtIP}} {
+			eventually(t, 90*time.Second, func() error {
 				out, err := inPhone(p.name, "cat", "/tmp/ip", "/tmp/router", "/tmp/dns")
 				if err != nil {
 					return fmt.Errorf("%s has no lease: %v %s", p.name, err, out)
@@ -309,17 +587,44 @@ func TestPhonesOnTheLAN(t *testing.T) {
 				return nil
 			})
 		}
-		if phone1IP == phone2IP {
-			t.Fatalf("both phones got %s", phone1IP)
+		if phone1IP == phone2IP || phone1IP == mgmtIP {
+			t.Fatalf("duplicate leases: %s %s %s", phone1IP, phone2IP, mgmtIP)
 		}
-		t.Logf("phone1 %s, phone2 %s; VPN servers A %s, B %s; box %s", phone1IP, phone2IP, ipA, ipB, boxIP)
-	})
-
-	step(t, "no profile: nothing reachable", func(t *testing.T) {
+		t.Logf("phone1 %s, phone2 %s, switch %s; VPN servers A %s, B %s; box %s", phone1IP, phone2IP, mgmtIP, ipA, ipB, boxIP)
+		for _, p := range []string{"phone1", "phone2", "switchmgmt"} {
+			if reached := boxHears(t, p); len(reached) > 0 {
+				t.Errorf("%s reached the box: %v", p, reached)
+			}
+		}
+		if out, _ := inBatter("sh", "-c", "ip -6 addr show dev phonelan"); strings.Contains(out, "inet6") {
+			t.Errorf("Batter has IPv6 on the phone network:\n%s", out)
+		}
 		mustBeOffline(t, "phone1", "no profile")
 		mustBeOffline(t, "phone2", "no profile")
-		if phoneTCP("phone1", echoIP, 80) || phoneTCP("phone1", lanHostIP, 80) {
-			t.Fatal("phone without a profile reached the internet")
+	})
+
+	step(t, "the switch's own management interface gets nothing and isn't a phone", func(t *testing.T) {
+		mustBeOffline(t, "switchmgmt", "not a phone")
+		if phoneTCP("switchmgmt", batterLAN, 8080) || phoneTCP("switchmgmt", batterLAN, 3000) || phoneTCP("switchmgmt", lanHostIP, 80) {
+			t.Fatal("the switch reached Batter or the box's LAN")
+		}
+		st := status(t)
+		if !strings.Contains(st, `"hostname":"usw-flex-mini"`) {
+			t.Fatalf("switch not listed as a client: %s", st)
+		}
+		var parsed struct {
+			Clients []struct{ IP, Serial string }
+		}
+		_ = json.Unmarshal([]byte(st), &parsed)
+		for _, c := range parsed.Clients {
+			if c.IP == mgmtIP && c.Serial != "" {
+				t.Fatalf("switch bound to a phone: %s", st)
+			}
+		}
+		_, devs := api.do(t, "GET", "/api/v1/devices", nil)
+		_, disc := api.do(t, "GET", "/api/v1/devices/discover", nil)
+		if strings.Contains(devs, mgmtIP) || strings.Contains(disc, mgmtIP) {
+			t.Fatalf("switch listed as a device: %s %s", devs, disc)
 		}
 	})
 
@@ -343,7 +648,6 @@ func TestPhonesOnTheLAN(t *testing.T) {
 			t.Fatalf("bind phone2: %v %s", err, out)
 		}
 	})
-
 	confA := clientConf(clientKeyA, serverPubA, "10.99.0", ipA)
 	confB := clientConf(clientKeyB, serverPubB, "10.98.0", ipB)
 	var profileA, profileB string
@@ -445,6 +749,38 @@ func TestPhonesOnTheLAN(t *testing.T) {
 		mustExit(t, "phone2", ipB, "profile B again")
 	})
 
+	step(t, "switching the port to nic3 gives nic2 back and phones keep working", func(t *testing.T) {
+		if st := setPort(t, mac3); !strings.Contains(st, `"state":"active"`) || !strings.Contains(st, mac3) {
+			t.Fatalf("switch: %s", st)
+		}
+		if state, present := onBox("nic2"); !present || state != "DOWN" {
+			t.Fatalf("nic2 after the switch: present=%v state=%q, want back on the box, DOWN", present, state)
+		}
+		if _, present := onBox("nic3"); present {
+			t.Fatal("nic3 still on the box")
+		}
+		mustExit(t, "phone1", ipA, "profile A on nic3")
+		mustExit(t, "phone2", ipB, "profile B on nic3")
+		if reached := boxHears(t, "phone1"); len(reached) > 0 {
+			t.Errorf("phone1 reached the box: %v", reached)
+		}
+	})
+
+	step(t, "a re-plugged port is taken again", func(t *testing.T) {
+		if out, err := box(time.Minute, "ip", "link", "del", "sw-nic3"); err != nil {
+			t.Fatalf("unplug: %v %s", err, out)
+		}
+		waitState(t, "missing")
+		if out, err := boxSh(replugCmd("nic3", mac3)); err != nil {
+			t.Fatalf("replug: %v %s", err, out)
+		}
+		waitState(t, "active")
+		if _, present := onBox("nic3"); present {
+			t.Fatal("re-plugged nic3 not taken from the box")
+		}
+		mustExit(t, "phone1", ipA, "after the re-plug")
+	})
+
 	step(t, "a tunnel going down blocks only its phones", func(t *testing.T) {
 		if out, err := inBatter("ip", "link", "set", "wg0", "down"); err != nil {
 			t.Fatalf("%v %s", err, out)
@@ -487,12 +823,40 @@ func TestPhonesOnTheLAN(t *testing.T) {
 			t.Fatalf("restart: %v\n%s", err, out)
 		}
 		api.waitHealthy(t)
+		// On a graceful stop Batter gives the port back to the box (down)
+		// and takes it again on start. Had its namespace gone first, a veth
+		// would be destroyed (a physical NIC goes back to the box): then it
+		// shows as missing until re-plugged, as a USB NIC would be.
+		if state, present := onBox("nic3"); present && state != "DOWN" {
+			t.Fatalf("nic3 on the box %s after the restart", state)
+		}
+		logs, _ := compose(time.Minute, "logs", "--no-color", "batter")
+		if !strings.Contains(logs, `"msg":"lan: phone network port given back to the box","component":"lan","name":"nic3"`) {
+			t.Errorf("Batter didn't give nic3 back on stop")
+		}
+		eventually(t, 60*time.Second, func() error {
+			st := status(t)
+			if strings.Contains(st, `"state":"missing"`) {
+				if _, present := onBox("nic3"); !present {
+					if out, err := boxSh(replugCmd("nic3", mac3)); err != nil {
+						return fmt.Errorf("replug: %v %s", err, out)
+					}
+				}
+			}
+			if !strings.Contains(st, `"state":"active"`) {
+				return fmt.Errorf("phone network not back: %s", st)
+			}
+			return nil
+		})
 		mustExit(t, "phone1", ipA, "profile A after restart")
 		mustExit(t, "phone2", ipB, "profile B after restart")
 		mustResolve(t, "phone1", dnsA, "profile A after restart")
 		mustResolve(t, "phone2", dnsB, "profile B after restart")
 		confined(t, "phone1")
 		confined(t, "phone2")
+		if reached := boxHears(t, "phone1"); len(reached) > 0 {
+			t.Errorf("phone1 reached the box after the restart: %v", reached)
+		}
 		eventually(t, 30*time.Second, func() error {
 			_, dev := api.do(t, "GET", "/api/v1/devices/FAKE01", nil)
 			if !strings.Contains(dev, `"lan_address":"`+phone1IP+`"`) {
@@ -505,6 +869,25 @@ func TestPhonesOnTheLAN(t *testing.T) {
 			strings.TrimSpace(out) != phone1IP {
 			t.Fatalf("phone1 renewed to %q (%v), want %s", out, err, phone1IP)
 		}
+	})
+
+	step(t, "turning it off gives the port back and leaves nothing behind", func(t *testing.T) {
+		if st := setPort(t, ""); !strings.Contains(st, `"state":"off"`) {
+			t.Fatalf("off: %s", st)
+		}
+		if state, present := onBox("nic3"); !present || state != "DOWN" {
+			t.Fatalf("nic3 after off: present=%v state=%q, want back on the box, DOWN", present, state)
+		}
+		if out, err := inBatter("nft", "list", "table", "inet", "batter_lan"); err == nil {
+			t.Fatalf("firewall left behind:\n%s", out)
+		}
+		if out, _ := inBatter("ip", "rule", "show"); strings.Contains(out, "phonelan") {
+			t.Fatalf("rules left behind:\n%s", out)
+		}
+		if out, _ := inBatter("sysctl", "-n", "net.ipv4.ip_forward"); strings.TrimSpace(out) != "0" {
+			t.Fatalf("forwarding left on: %q", out)
+		}
+		mustBeOffline(t, "phone1", "the phone network off")
 	})
 }
 
@@ -634,7 +1017,7 @@ func (a *api) exitIP(t *testing.T, id string) string {
 	return res.ExitIP
 }
 
-func containerIP(t *testing.T, name string) string {
+func containerIP(t *testing.T, network, name string) string {
 	t.Helper()
 	return strings.TrimSpace(run(t, time.Minute, "docker", "inspect", "-f",
 		"{{(index .NetworkSettings.Networks \""+network+"\").IPAddress}}", name))
