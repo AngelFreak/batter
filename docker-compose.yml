@@ -22,6 +22,9 @@ services:
       # Plain HTTP stays on this machine; everyone else comes in via caddy
       # (HTTPS), which browsers require for live video.
       - "${BATTER_PORT:-127.0.0.1:3000}:3000"
+      # The Go backend, for caddy, which sends /api and /ws straight to it
+      # (video frames skip the Next.js proxy). Local only.
+      - "127.0.0.1:${BATTER_API_PORT:-8080}:8080"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-batter}:${POSTGRES_PASSWORD:-batter}@postgres:5432/${POSTGRES_DB:-batter}?sslmode=disable
       PORT: "8080"
@@ -29,9 +32,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:-}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # caddy -> Next.js (in-container) -> backend: believe X-Forwarded-For
-      # from the in-container hop so rate limits see real client IPs.
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1}
+      # Believe X-Forwarded-For (the real client IP, set by caddy) from caddy,
+      # which reaches the published API port from the docker gateway, and from
+      # the in-container Next.js hop ("gateway" = this container's default
+      # gateway). See .env.example before exposing BATTER_PORT beyond localhost.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1,gateway}
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,6 +65,8 @@ services:
     # Host networking: listens on the box's :80/:443 directly, so certificates
     # are issued for the address clients actually use (LAN, NetBird, ...).
     network_mode: host
+    environment:
+      BATTER_API_PORT: ${BATTER_API_PORT:-8080}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

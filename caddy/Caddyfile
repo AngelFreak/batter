@@ -29,7 +29,16 @@ https:// {
 		file_server
 	}
 
-	reverse_proxy 127.0.0.1:3000
+	# The API and WebSockets (live video) go straight to the Go backend;
+	# routing them through the Next.js server's proxy cost a hop per frame.
+	@backend path /api/* /ws/*
+	handle @backend {
+		reverse_proxy 127.0.0.1:{$BATTER_API_PORT:8080}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
 }
 
 http:// {
