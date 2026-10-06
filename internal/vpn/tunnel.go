@@ -155,6 +155,9 @@ func (t *tunnels) bringUp(ctx context.Context, s Slot, cfg *Config) error {
 	if _, err := t.cmd(ctx, "", "ip", "link", "add", iface, "type", "wireguard"); err != nil {
 		return err
 	}
+	// Keep the config on stdin, not in a file: on Ubuntu 26.04 hosts the
+	// AppArmor "wg" profile confines wg inside this container too, and it
+	// may only open config and key files under /etc/wireguard/.
 	if _, err := t.cmd(ctx, cfg.Setconf(), "wg", "setconf", iface, "/dev/stdin"); err != nil {
 		return err
 	}
