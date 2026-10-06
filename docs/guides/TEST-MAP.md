@@ -21,7 +21,8 @@ code against `internal/device/scrcpytest` or `test/fakeadb`, over loopback.
 | Audio config flag (bit 62); audio ends on a session packet | `TestSessionStreamsOpusAudioAlongsideVideo`, `TestAudioEndsOnSessionPacket` (a session packet with a plausible size is not played) | fake phone |
 | Keyframe on viewer join, shared between joiners | `TestViewersJoiningTogetherShareKeyframes` (fakeadb, v5 framing) | fake phone + DB |
 | Browser header decode (session/config/key/delta, PTS mask) | `scrcpy-packet.test.ts`; `device-audio.test.ts` decodes through the real player | unit |
-| Device viewer: video renders, touch/scroll/keys, rotation, audio, thumbnails, two viewers | **untested in the repo.** By hand on a real phone, see `plans/progress/2026-10-06-scrcpy-5.md` | phone |
+| Real scrcpy-server 5.0: handshake, decode, touch/text/keys/scroll, rotation + touch after it, audio, thumbnail tier, two viewers | **not automated.** Run by hand 2026-10-06 against an emulator through the API/WebSockets; see `plans/progress/2026-10-06-scrcpy-5.md` | emulator (by hand) |
+| Device viewer page in a browser (canvas, input mapping, thumbnails grid) | **untested in the repo**, and not yet seen for 5.0 | Chrome + phone |
 | Server jar integrity | Dockerfile `sha256sum -c` against upstream's signed SUMS | `docker build` |
 
 Mutation-checked 2026-10-06. Reverting each of these fails at least one row above:

@@ -321,10 +321,14 @@ func (s *Session) videoReadLoop(ctx context.Context, adb *ADB, serial string, ab
 			return
 		}
 
-		// A new capture session (rotation): its size, and no payload.
+		// A new capture session: its size, and no payload. The server
+		// sends one per capture start (rotation, encoder reset), so most
+		// repeat the current size.
 		if width, height, ok := ParseSessionPacket(headerBuf); ok {
-			s.setSize(width, height)
-			s.logger.Info("video size changed", "width", width, "height", height)
+			if w, h := s.Size(); w != width || h != height {
+				s.setSize(width, height)
+				s.logger.Info("video size changed", "width", width, "height", height)
+			}
 			continue
 		}
 
