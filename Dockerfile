@@ -18,10 +18,15 @@ RUN npm run build
 
 # Stage 3: Download scrcpy-server
 FROM alpine:3.20 AS scrcpy-downloader
-ARG SCRCPY_VERSION=3.3.4
+# The server runs on the phones, so it is pinned by hash: the SHA-256 from
+# upstream's signed SHA256SUMS.txt for this version. Change both together;
+# the version must also match device.ServerVersion (internal/device).
+ARG SCRCPY_VERSION=5.0
+ARG SCRCPY_SERVER_SHA256=26cbc9ad0aced6c2282455bef4fb43462605c1f8758c74b4ab1dbf818c229daa
 RUN apk add --no-cache wget
 RUN wget -q -O /scrcpy-server \
-    "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-server-v${SCRCPY_VERSION}"
+    "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-server-v${SCRCPY_VERSION}" \
+    && echo "${SCRCPY_SERVER_SHA256}  /scrcpy-server" | sha256sum -c -
 
 # Stage 4: gnirehtet (reverse tethering). The relay is built from source
 # because the release binary is glibc-only; libc is bumped because v2.5.1's

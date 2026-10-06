@@ -124,6 +124,12 @@ docker compose up -d --build
 Database changes are applied automatically when the new version starts. Users
 stay logged in; open live views reconnect by themselves within a few seconds.
 
+The scrcpy-server that runs on the phones is part of the image, and Batter only
+works with the version it was built for (currently 5.0). Don't set
+`SCRCPY_VERSION` in `.env` unless you also rebuild with a matching server. A
+mismatch shows up as "unexpected first video packet" in the logs, and live view
+won't start.
+
 ### Backups
 
 The database is the only thing that needs backing up:

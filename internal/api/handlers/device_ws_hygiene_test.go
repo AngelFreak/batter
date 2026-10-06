@@ -205,11 +205,11 @@ func TestSlowVideoClientStaysCurrent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}
-		if len(msg) < 28 || msg[0]&0x80 != 0 { // config packet
+		if len(msg) < 28 || msg[0]&0x40 != 0 { // config packet (bit 62)
 			prevKey = true
 			continue
 		}
-		key := msg[0]&0x40 != 0
+		key := msg[0]&0x20 != 0 // bit 61
 		seq := binary.BigEndian.Uint32(msg[16:])
 		if !key && !prevKey && seq != prevSeq+1 {
 			t.Fatalf("delta %d after %d: decoding across a gap", seq, prevSeq)

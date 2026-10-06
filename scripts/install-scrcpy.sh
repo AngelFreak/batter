@@ -4,7 +4,18 @@
 
 set -e
 
-SCRCPY_VERSION="3.3.4"
+SCRCPY_VERSION="5.0"
+# SHA-256s from upstream's signed SHA256SUMS.txt for this version.
+SCRCPY_TARBALL_SHA256="f052ad9eb981879e8c5f066c5ef122b39b6c9853b383d6497219030e6549baed"
+SCRCPY_SERVER_SHA256="26cbc9ad0aced6c2282455bef4fb43462605c1f8758c74b4ab1dbf818c229daa"
+
+verify() { # file sha256
+    echo "$2  $1" | sha256sum -c --quiet - || {
+        echo "Error: checksum mismatch for $1"
+        rm -rf "$TMPDIR"
+        exit 1
+    }
+}
 
 echo "=== scrcpy + adb Installation Script ==="
 echo "Version: $SCRCPY_VERSION"
@@ -37,7 +48,7 @@ echo ""
 # Check for existing installation
 EXISTING_VERSION=""
 if command -v scrcpy &> /dev/null; then
-    EXISTING_VERSION=$(scrcpy --version 2>&1 | head -1 | grep -oP '\d+\.\d+\.\d+' || true)
+    EXISTING_VERSION=$(scrcpy --version 2>&1 | head -1 | grep -oP '\d+\.\d+(\.\d+)?' | head -1 || true)
     if [ "$EXISTING_VERSION" = "$SCRCPY_VERSION" ]; then
         echo "scrcpy $SCRCPY_VERSION is already installed."
         echo ""
@@ -72,6 +83,7 @@ wget -q --show-progress -O "$TMPDIR/$TARBALL" "$DOWNLOAD_URL" || {
         rm -rf "$TMPDIR"
         exit 1
     }
+    verify "$TMPDIR/scrcpy-server" "$SCRCPY_SERVER_SHA256"
 
     echo ""
     echo "Installing adb from apt..."
@@ -104,8 +116,10 @@ echo "=== Step 3: Install binaries ==="
 echo ""
 
 # Extract
+verify "$TMPDIR/$TARBALL" "$SCRCPY_TARBALL_SHA256"
 tar xzf "$TMPDIR/$TARBALL" -C "$TMPDIR"
 EXTRACTED="$TMPDIR/scrcpy-linux-x86_64-v${SCRCPY_VERSION}"
+verify "$EXTRACTED/scrcpy-server" "$SCRCPY_SERVER_SHA256"
 
 # Install binaries
 echo "Installing scrcpy to /usr/local/bin/scrcpy..."

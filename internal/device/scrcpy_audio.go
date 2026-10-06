@@ -48,6 +48,10 @@ func (s *Session) audioReadLoop() {
 			s.logger.Debug("audio stream ended", "error", err)
 			return
 		}
+		if binary.BigEndian.Uint64(header[0:8])&PacketFlagSession != 0 {
+			s.logger.Warn("session packet on the audio stream; protocol mismatch")
+			return
+		}
 		size := binary.BigEndian.Uint32(header[8:12])
 		if size == 0 || size > maxAudioPacket {
 			s.logger.Warn("invalid audio packet size", "size", size)
@@ -73,7 +77,7 @@ const audioSubBuffer = 10
 // its backlog and continues from the newest packet (latency-first, like
 // video); the config packet is kept.
 func (s *Session) broadcastAudio(msg []byte) {
-	isConfig := binary.BigEndian.Uint64(msg[0:8])>>63 == 1
+	isConfig := binary.BigEndian.Uint64(msg[0:8])&PacketFlagConfig != 0
 	s.audioMu.Lock()
 	defer s.audioMu.Unlock()
 	if isConfig {

@@ -1,7 +1,7 @@
 // Package scrcpytest fakes the device side of a scrcpy session for tests: an
 // adb that accepts every command and records the scrcpy-server launch, and a
 // device that connects back to the session's listener over loopback in the
-// same socket order, with the same handshake, as scrcpy-server 3.3.4.
+// same socket order, with the same handshake, as scrcpy-server 5.0.
 package scrcpytest
 
 import (
@@ -27,8 +27,19 @@ const (
 	AudioConfigError uint32 = 1
 )
 
-// FlagConfig marks a codec config packet in the 12-byte packet header.
-const FlagConfig uint64 = 1 << 63
+// Flags in the 12-byte packet header (scrcpy 4.0+). Deliberately not taken
+// from package device, so a wrong constant there fails the tests.
+const (
+	FlagSession  uint64 = 1 << 63 // video session packet: size, no payload
+	FlagConfig   uint64 = 1 << 62 // codec config packet
+	FlagKeyFrame uint64 = 1 << 61 // keyframe
+)
+
+// Size of the first session packet Connect sends.
+const (
+	Width  = 1080
+	Height = 2400
+)
 
 // ADB is a fake adb executable. reverse records the listener port, a shell
 // running app_process records the server arguments and then blocks like the
@@ -112,7 +123,8 @@ type Device struct {
 
 // Connect dials the session like scrcpy-server does in reverse-tunnel mode:
 // video, then audio (if enabled), then control, then the 64-byte device name
-// on the first socket followed by the video header (codec, width, height).
+// on the first socket followed by the codec ID and a session packet
+// (Width x Height).
 // The audio header is left to the caller, since the real server only writes
 // it once its encoder is running (or the disable code if it can't capture).
 func Connect(t testing.TB, port int, withAudio bool) *Device {
@@ -131,13 +143,22 @@ func Connect(t testing.TB, port int, withAudio bool) *Device {
 	d.Control = dial()
 	t.Cleanup(d.Close)
 
-	meta := make([]byte, 64+12)
+	meta := make([]byte, 64+4)
 	copy(meta, "Fake Phone")
 	binary.BigEndian.PutUint32(meta[64:], CodecH264)
-	binary.BigEndian.PutUint32(meta[68:], 1080)
-	binary.BigEndian.PutUint32(meta[72:], 2400)
 	write(t, d.Video, meta)
+	d.WriteSession(t, Width, Height)
 	return d
+}
+
+// WriteSession writes a video session packet, as the server does before the
+// first frame and whenever the capture size changes (rotation).
+func (d *Device) WriteSession(t testing.TB, width, height uint32) {
+	t.Helper()
+	buf := binary.BigEndian.AppendUint32(nil, uint32(FlagSession>>32))
+	buf = binary.BigEndian.AppendUint32(buf, width)
+	buf = binary.BigEndian.AppendUint32(buf, height)
+	write(t, d.Video, buf)
 }
 
 // WriteAudioHeader writes the audio stream's codec ID (or disable code).

@@ -21,7 +21,7 @@ const OPUS_HEAD = new TextEncoder().encode('OpusHead\x01\x02\x38\x01\x80\xbb\x00
 function packet(payload: Uint8Array, opts: { config?: boolean; pts?: number } = {}): ArrayBuffer {
   const buf = new ArrayBuffer(12 + payload.length);
   const view = new DataView(buf);
-  if (opts.config) view.setUint32(0, 0x80000000);
+  if (opts.config) view.setUint32(0, 0x40000000); // bit 62
   else view.setUint32(4, opts.pts ?? 0);
   view.setUint32(8, payload.length);
   new Uint8Array(buf, 12).set(payload);

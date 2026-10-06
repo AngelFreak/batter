@@ -107,11 +107,13 @@ func scrcpyServer(args []string) error {
 			}
 		}
 	}
-	handshake := make([]byte, 76)
+	// Device name and codec, then the first session packet (scrcpy 4.0+).
+	handshake := make([]byte, 64+4+12)
 	copy(handshake, "Fake Phone")
 	copy(handshake[64:], "h264")
-	binary.BigEndian.PutUint32(handshake[68:], 1080)
-	binary.BigEndian.PutUint32(handshake[72:], 1920)
+	binary.BigEndian.PutUint32(handshake[68:], uint32(flagSession>>32))
+	binary.BigEndian.PutUint32(handshake[72:], 1080)
+	binary.BigEndian.PutUint32(handshake[76:], 1920)
 	if _, err := video.Write(handshake); err != nil {
 		return err
 	}
@@ -145,9 +147,9 @@ func scrcpyServer(args []string) error {
 				f.Close()
 			}
 			videoMu.Lock()
-			err := writePacket(video, 1<<63, []byte{0, 0, 0, 1, 0x67, 0x42}) // config
+			err := writePacket(video, flagConfig, []byte{0, 0, 0, 1, 0x67, 0x42})
 			if err == nil {
-				err = writePacket(video, 1<<62, frame(0, 16)) // keyframe
+				err = writePacket(video, flagKeyFrame, frame(0, 16))
 			}
 			videoMu.Unlock()
 			if err != nil {
@@ -156,6 +158,14 @@ func scrcpyServer(args []string) error {
 		}
 	}
 }
+
+// scrcpy 4.0+ packet header flags. Kept independent of internal/device so a
+// wrong constant there fails the tests instead of agreeing with itself.
+const (
+	flagSession  uint64 = 1 << 63
+	flagConfig   uint64 = 1 << 62
+	flagKeyFrame uint64 = 1 << 61
+)
 
 func writePacket(w io.Writer, flags uint64, payload []byte) error {
 	header := make([]byte, 12)
@@ -180,7 +190,7 @@ func stream(video net.Conn, mu *sync.Mutex, fps, size int) {
 		<-ticker.C
 		var flags uint64
 		if seq%uint32(fps) == 0 {
-			flags = 1 << 62
+			flags = flagKeyFrame
 		}
 		mu.Lock()
 		err := writePacket(video, flags, frame(seq, size))
@@ -197,7 +207,7 @@ func streamAudio(audio net.Conn) {
 	if _, err := audio.Write(binary.BigEndian.AppendUint32(nil, 0x6f707573)); err != nil { // "opus"
 		return
 	}
-	if err := writePacket(audio, 1<<63, []byte("OpusHead")); err != nil {
+	if err := writePacket(audio, flagConfig, []byte("OpusHead")); err != nil {
 		return
 	}
 	ticker := time.NewTicker(20 * time.Millisecond)

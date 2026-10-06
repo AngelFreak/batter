@@ -12,6 +12,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,8 +58,11 @@ type Session struct {
 	Serial     string
 	SCID       uint32
 	DeviceName string
-	Width      int
-	Height     int
+
+	// Current video size (width<<32 | height), from the latest session
+	// packet. It changes when the device rotates, and the server ignores
+	// touches that carry any other size, so read it per event via Size.
+	size atomic.Uint64
 
 	videoConn   net.Conn
 	controlConn net.Conn
@@ -180,9 +184,10 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 	}
 	s.videoConn = videoConn
 
-	// Step 6: Read video handshake (reverse tunnel: no dummy byte)
-	// 64 bytes device name + 4 bytes codec + 4 bytes width + 4 bytes height = 76 bytes
-	handshake := make([]byte, 76)
+	// Step 6: Read video handshake (reverse tunnel: no dummy byte):
+	// 64 bytes device name + 4 bytes codec, then the first session packet,
+	// which carries the video size.
+	handshake := make([]byte, 64+4+12)
 	if _, err := io.ReadFull(videoConn, handshake); err != nil {
 		cancel()
 		videoConn.Close()
@@ -192,13 +197,19 @@ func newSession(adb *ADB, serial, scrcpyServerPath, scrcpyVersion string, opts S
 
 	s.DeviceName = strings.TrimRight(string(handshake[0:64]), "\x00")
 	// handshake[64:68] = codec ID (H.264 = 0x68323634)
-	s.Width = int(binary.BigEndian.Uint32(handshake[68:72]))
-	s.Height = int(binary.BigEndian.Uint32(handshake[72:76]))
+	width, height, ok := ParseSessionPacket(handshake[68:80])
+	if !ok {
+		cancel()
+		videoConn.Close()
+		cleanup()
+		return nil, fmt.Errorf("unexpected first video packet (is scrcpy-server %s?)", scrcpyVersion)
+	}
+	s.setSize(width, height)
 
 	logger.Info("video handshake complete",
 		"device_name", s.DeviceName,
-		"width", s.Width,
-		"height", s.Height,
+		"width", width,
+		"height", height,
 	)
 
 	// Step 7: Accept the audio connection, which scrcpy-server opens between
@@ -310,6 +321,13 @@ func (s *Session) videoReadLoop(ctx context.Context, adb *ADB, serial string, ab
 			return
 		}
 
+		// A new capture session (rotation): its size, and no payload.
+		if width, height, ok := ParseSessionPacket(headerBuf); ok {
+			s.setSize(width, height)
+			s.logger.Info("video size changed", "width", width, "height", height)
+			continue
+		}
+
 		ptsAndFlags := binary.BigEndian.Uint64(headerBuf[0:8])
 		size := binary.BigEndian.Uint32(headerBuf[8:12])
 
@@ -328,10 +346,7 @@ func (s *Session) videoReadLoop(ctx context.Context, adb *ADB, serial string, ab
 			return
 		}
 
-		// Check if this is a config packet (PTS flags)
-		// In scrcpy, bit 63 of PTS indicates config packet, bit 62 indicates key frame
-		isConfig := (ptsAndFlags >> 63) & 1
-		if isConfig == 1 {
+		if ptsAndFlags&PacketFlagConfig != 0 {
 			s.configMu.Lock()
 			// Store header + NALU as config packet
 			s.configPacket = make([]byte, 12+len(naluData))
@@ -347,6 +362,16 @@ func (s *Session) videoReadLoop(ctx context.Context, adb *ADB, serial string, ab
 
 		s.broadcast(msg)
 	}
+}
+
+// Size returns the current video size, which changes when the device rotates.
+func (s *Session) Size() (width, height int) {
+	v := s.size.Load()
+	return int(v >> 32), int(uint32(v))
+}
+
+func (s *Session) setSize(width, height int) {
+	s.size.Store(uint64(uint32(width))<<32 | uint64(uint32(height)))
 }
 
 // SubscribeVideo creates a new video subscription. Returns a channel that receives
