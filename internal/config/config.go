@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/XpertaDK/batter/internal/device"
 )
 
 // Config holds all application configuration.
@@ -56,7 +58,7 @@ func Load() (*Config, error) {
 		Host:             getEnv("HOST", "0.0.0.0"),
 		DatabaseURL:      getEnv("DATABASE_URL", "postgres://batter:batter@localhost:5432/batter?sslmode=disable"),
 		ScrcpyServerPath: getEnv("SCRCPY_SERVER_PATH", "/usr/local/share/scrcpy/scrcpy-server"),
-		ScrcpyVersion:    getEnv("SCRCPY_VERSION", "3.3.4"),
+		ScrcpyVersion:    getEnv("SCRCPY_VERSION", device.ServerVersion),
 		GnirehtetPath:    getEnv("GNIREHTET_PATH", "/usr/local/bin/gnirehtet"),
 		GnirehtetAPK:     getEnv("GNIREHTET_APK", "/usr/local/share/gnirehtet/gnirehtet.apk"),
 		VPNExitIPURL:     getEnv("VPN_EXIT_IP_URL", "https://api.ipify.org"),

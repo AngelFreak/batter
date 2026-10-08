@@ -92,7 +92,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 
 	scrcpyVersion := cfg.ScrcpyVersion
 	if scrcpyVersion == "" {
-		scrcpyVersion = "2.7"
+		scrcpyVersion = ServerVersion
 	}
 
 	var ssCache *ScreenshotCache
@@ -145,8 +145,7 @@ func (m *Manager) ListDevices(ctx context.Context) ([]DeviceInfo, error) {
 		}
 		if s, ok := m.sessions[d.Serial]; ok {
 			info.HasSession = true
-			info.Width = s.Width
-			info.Height = s.Height
+			info.Width, info.Height = s.Size()
 		}
 		if tier, ok := m.sessionTiers[d.Serial]; ok {
 			info.SessionTier = tier
@@ -271,7 +270,8 @@ func (m *Manager) startSessionLocked(serial string, opts SessionOptions) (*Sessi
 	m.sessionQuality[serial] = qualityFor(opts.VideoBitRate)
 	m.mu.Unlock()
 
-	m.logger.Info("session started", "serial", serial, "width", session.Width, "height", session.Height, "tier", tier)
+	width, height := session.Size()
+	m.logger.Info("session started", "serial", serial, "width", width, "height", height, "tier", tier)
 	return session, nil
 }
 

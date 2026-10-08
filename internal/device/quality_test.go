@@ -17,7 +17,7 @@ func TestServerArgsCarryBitRatePerTierAndQuality(t *testing.T) {
 		"high":      {FullOptions(QualityHigh), "video_bit_rate=8000000"},
 	}
 	for name, c := range cases {
-		if args := buildServerArgs(1, "3.3.4", c.opts); !slices.Contains(args, c.want) {
+		if args := buildServerArgs(1, ServerVersion, c.opts); !slices.Contains(args, c.want) {
 			t.Errorf("%s: args %v lack %s", name, args, c.want)
 		}
 	}
