@@ -97,7 +97,7 @@ scripts/                 # Utility scripts
 | `JWT_SECRET` | *(generated)* | Secret for signing JWT tokens; if unset, generated once and stored in `DATA_DIR/jwt-secret` |
 | `JWT_EXPIRY_SECS` | `3600` | Access token expiry in seconds |
 | `SCRCPY_SERVER_PATH` | `/usr/local/share/scrcpy/scrcpy-server` | Path to scrcpy-server binary |
-| `SCRCPY_VERSION` | `5.0` | scrcpy-server version; must be 4.0 or later (the 4.0 stream framing) |
+| `SCRCPY_VERSION` | `5.0.1` | scrcpy-server version; must be 4.0 or later (the 4.0 stream framing) |
 | `DATA_DIR` | `./data` | Directory for screenshot cache and runtime data |
 | `ALLOWED_ORIGINS` | *(same origin)* | Comma-separated browser origins; empty allows only the host the app is opened on |
 | `TRUSTED_PROXIES` | *(none)* | Proxy IPs/CIDRs whose `X-Forwarded-For` is believed |

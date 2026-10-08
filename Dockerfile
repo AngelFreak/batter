@@ -21,8 +21,8 @@ FROM alpine:3.20 AS scrcpy-downloader
 # The server runs on the phones, so it is pinned by hash: the SHA-256 from
 # upstream's signed SHA256SUMS.txt for this version. Change both together;
 # the version must also match device.ServerVersion (internal/device).
-ARG SCRCPY_VERSION=5.0
-ARG SCRCPY_SERVER_SHA256=26cbc9ad0aced6c2282455bef4fb43462605c1f8758c74b4ab1dbf818c229daa
+ARG SCRCPY_VERSION=5.0.1
+ARG SCRCPY_SERVER_SHA256=764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536
 RUN apk add --no-cache wget
 RUN wget -q -O /scrcpy-server \
     "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-server-v${SCRCPY_VERSION}" \

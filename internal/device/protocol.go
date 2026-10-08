@@ -7,7 +7,7 @@ import (
 // ServerVersion is the scrcpy-server release this package speaks. The server
 // refuses a client whose version string differs from its own, and the
 // framing below is that of scrcpy 4.0 and later.
-const ServerVersion = "5.0"
+const ServerVersion = "5.0.1"
 
 // Flags in the first 8 bytes (big-endian) of every 12-byte packet header on
 // the video and audio sockets (scrcpy 4.0+). Below them is the PTS.
