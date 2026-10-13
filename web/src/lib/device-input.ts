@@ -2,6 +2,7 @@ import { keycodeMap } from "./device-keymap";
 import { getToken } from "./auth";
 import { Reconnector } from "./reconnect";
 import { WheelGestures } from "./wheel-gesture";
+import { NavAction, navMessages } from "./device-nav";
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 
@@ -116,6 +117,7 @@ export class DeviceInputHandler {
   }
 
   private handleMouseDown = (e: MouseEvent) => {
+    if (e.button !== 0) return;
     e.preventDefault();
     const { x, y } = this.getNormalizedCoords(e);
     this.send({
@@ -143,6 +145,7 @@ export class DeviceInputHandler {
   };
 
   private handleMouseUp = (e: MouseEvent) => {
+    if (e.button !== 0) return;
     e.preventDefault();
     const { x, y } = this.getNormalizedCoords(e);
     this.send({
@@ -218,8 +221,10 @@ export class DeviceInputHandler {
     }
   };
 
+  // Right-click is Back, as in scrcpy.
   private handleContextMenu = (e: Event) => {
     e.preventDefault();
+    this.nav("back");
   };
 
   private getMetastate(e: KeyboardEvent): number {
@@ -261,6 +266,11 @@ export class DeviceInputHandler {
 
   sendScreenOff() {
     this.send({ type: "screen_off" });
+  }
+
+  /** Press an on-screen navigation button (Back, Home, Recents, All apps). */
+  nav(action: NavAction) {
+    for (const msg of navMessages(action)) this.send(msg);
   }
 
   sendText(text: string) {

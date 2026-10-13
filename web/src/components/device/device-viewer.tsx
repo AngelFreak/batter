@@ -7,6 +7,7 @@ import { DeviceAudioPlayer } from '@/lib/device-audio';
 import { AudioControls, type AudioView } from '@/lib/audio-controls';
 import { fetchScreenshot, pushFile, installAPK } from '@/lib/api';
 import { useNoSwipeNavigation } from '@/lib/use-no-swipe-navigation';
+import { NavBar } from './nav-bar';
 
 interface DeviceViewerProps {
   serial: string;
@@ -343,6 +344,8 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
           </div>
         )}
       </div>
+
+      <NavBar onNav={(action) => inputRef.current?.nav(action)} disabled={controlStatus !== 'connected'} />
 
       {/* Clipboard panel */}
       {showClipboard && (
