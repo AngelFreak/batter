@@ -1,7 +1,7 @@
 # Plan: Back / Home / Recents / All-apps buttons under the device screen
 
 **Date:** 2026-10-13 · **Branch:** `feature/scrcpy-5` (PR #6), at the founder's request
-("merge it into this branch") · **Status:** built and verified on two phones. The §2.2 review is BLOCKED (see Review), so this is not ready to merge.
+("merge it into this branch") · **Status:** merged to `main` with PR #6 on 2026-10-13 as a founder override, without the §2.2 review (see Review).
 
 ## What
 
@@ -81,6 +81,8 @@ code is also Claude-authored (2026-10-01). Reviewer: a different-vendor model or
 (below).
 
 ## Review
+
+**Founder override, 2026-10-13:** merged to `main` (PR #6, which also carries the nav bar from `plans/2026-10-13-viewer-nav-bar.md`) without a §2.2 or §2.6 review, on the founder's explicit choice ("Merge now as an override"). Codex and Grok were both over their usage limits that morning. The review is still owed: run Codex on the merged diff (`git diff 823a87c..<merge>`) when it is available, and record its verdict here. Findings are fixed forward.
 
 **Blocked, 2026-10-13 06:30 UTC.** No different-vendor review has happened.
 
