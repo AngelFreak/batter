@@ -1,5 +1,6 @@
 import { getToken } from './auth';
 import { Reconnector } from './reconnect';
+import { parsePacketHeader } from './scrcpy-packet';
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 
@@ -207,13 +208,11 @@ export class DeviceAudioPlayer {
   }
 
   private handlePacket(data: ArrayBuffer) {
-    if (data.byteLength < 12) return;
-    const view = new DataView(data);
-    const ptsHigh = view.getUint32(0);
-    const ptsLow = view.getUint32(4);
+    const header = parsePacketHeader(data);
+    if (!header) return;
     const payload = new Uint8Array(data, 12);
 
-    if (ptsHigh >>> 31) {
+    if (header.config) {
       // Config packet: the OpusHead the decoder is configured with.
       this.description = payload.slice();
       this.closeDecoder();
@@ -223,9 +222,7 @@ export class DeviceAudioPlayer {
 
     const decoder = this.ensureDecoder();
     if (!decoder) return;
-    // PTS is in microseconds, below the two flag bits.
-    const timestamp = (ptsHigh & 0x3fffffff) * 2 ** 32 + ptsLow;
-    decoder.decode(new EncodedAudioChunk({ type: "key", timestamp, data: payload }));
+    decoder.decode(new EncodedAudioChunk({ type: "key", timestamp: header.pts, data: payload }));
   }
 
   private ensureDecoder(): AudioDecoder | null {

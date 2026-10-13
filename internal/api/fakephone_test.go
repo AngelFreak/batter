@@ -90,7 +90,7 @@ func TestViewersJoiningTogetherShareKeyframes(t *testing.T) {
 					t.Errorf("viewer %d got no keyframe: %v", i, err)
 					return
 				}
-				if len(msg) >= 12 && msg[0]&0x40 != 0 { // keyframe flag (bit 62)
+				if len(msg) >= 12 && msg[0]&0x20 != 0 { // keyframe flag (bit 61)
 					return
 				}
 			}

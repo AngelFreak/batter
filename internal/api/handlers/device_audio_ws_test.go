@@ -23,6 +23,16 @@ import (
 // connected. It returns the device end and the WebSocket URL.
 func startAudioTestServer(t *testing.T) (*scrcpytest.Device, string) {
 	t.Helper()
+	dev, _, url := startSessionTestServer(t, "audio", (*DeviceWSHandler).AudioStream)
+	return dev, url
+}
+
+// startSessionTestServer runs a real device manager (with a fake adb on
+// PATH) and one /ws/device/:serial/<kind> route, with a full-tier session
+// whose fake device has connected. It returns the device end, the manager
+// and the WebSocket URL.
+func startSessionTestServer(t *testing.T, kind string, route func(*DeviceWSHandler, *gin.Context)) (*scrcpytest.Device, *device.Manager, string) {
+	t.Helper()
 	fake := scrcpytest.NewADB(t)
 	t.Setenv("PATH", fake.Dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	server := filepath.Join(fake.Dir, "scrcpy-server")
@@ -49,10 +59,11 @@ func startAudioTestServer(t *testing.T) (*scrcpytest.Device, string) {
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.GET("/ws/device/:serial/audio", NewDeviceWSHandler(dm, logger, nil).AudioStream)
+	h := NewDeviceWSHandler(dm, logger, nil)
+	r.GET("/ws/device/:serial/"+kind, func(c *gin.Context) { route(h, c) })
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
-	return dev, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/device/FAKE/audio"
+	return dev, dm, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/device/FAKE/" + kind
 }
 
 func dialAudio(t *testing.T, url string) *ws.Conn {
@@ -92,7 +103,7 @@ func TestAudioStreamSendsStatusConfigThenPackets(t *testing.T) {
 	// The config packet was sent before this listener joined; it must still
 	// come first so the browser can configure its decoder.
 	_, cfg, err := conn.ReadMessage()
-	if err != nil || len(cfg) != 12+len(opusHead) || cfg[0] != 0x80 {
+	if err != nil || len(cfg) != 12+len(opusHead) || cfg[0] != 0x40 { // config flag, bit 62
 		t.Fatalf("config message = %x, %v", cfg, err)
 	}
 
@@ -107,7 +118,7 @@ func TestAudioStreamSendsStatusConfigThenPackets(t *testing.T) {
 				close(got)
 				return
 			}
-			if msg[0]&0x80 == 0 {
+			if msg[0]&0x40 == 0 {
 				got <- msg
 				return
 			}

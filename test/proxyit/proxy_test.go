@@ -194,7 +194,9 @@ func TestCaddyRoutesAPIAndWebSocketsStraightToGo(t *testing.T) {
 			if err != nil {
 				t.Fatalf("no keyframe over the WebSocket: %v", err)
 			}
-			if len(msg) >= 12 && msg[0]&0x40 != 0 {
+			// Keyframe flag (bit 61), not the config packet (bit 62)
+			// that a new viewer is sent first.
+			if len(msg) >= 12 && msg[0]&0x20 != 0 && msg[0]&0x40 == 0 {
 				break
 			}
 		}

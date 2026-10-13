@@ -443,11 +443,12 @@ func (h *DeviceHandler) StartSession(c *gin.Context) {
 		return
 	}
 
+	width, height := session.Size()
 	c.JSON(http.StatusOK, gin.H{
 		"serial":       session.Serial,
 		"device_name":  session.DeviceName,
-		"width":        session.Width,
-		"height":       session.Height,
+		"width":        width,
+		"height":       height,
 		"session_tier": h.deviceManager.GetSessionTier(serial),
 	})
 }
@@ -500,10 +501,11 @@ func (h *DeviceHandler) UpgradeSession(c *gin.Context) {
 		return
 	}
 
+	width, height := session.Size()
 	c.JSON(http.StatusOK, gin.H{
 		"serial":       session.Serial,
-		"width":        session.Width,
-		"height":       session.Height,
+		"width":        width,
+		"height":       height,
 		"session_tier": h.deviceManager.GetSessionTier(serial),
 		"quality":      h.deviceManager.GetSessionQuality(serial),
 	})
@@ -520,10 +522,11 @@ func (h *DeviceHandler) DowngradeSession(c *gin.Context) {
 		return
 	}
 
+	width, height := session.Size()
 	c.JSON(http.StatusOK, gin.H{
 		"serial":       session.Serial,
-		"width":        session.Width,
-		"height":       session.Height,
+		"width":        width,
+		"height":       height,
 		"session_tier": h.deviceManager.GetSessionTier(serial),
 	})
 }

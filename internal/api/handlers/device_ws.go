@@ -246,9 +246,6 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 		}
 	}()
 
-	width := uint16(session.Width)
-	height := uint16(session.Height)
-
 	for {
 		_, msgData, err := conn.ReadMessage()
 		if err != nil {
@@ -262,6 +259,11 @@ func (h *DeviceWSHandler) ControlStream(c *gin.Context) {
 			h.logger.Debug("invalid control message", "error", err)
 			continue
 		}
+
+		// The size is read per event: it changes when the device rotates,
+		// and the server ignores touches carrying a stale one.
+		vw, vh := session.Size()
+		width, height := uint16(vw), uint16(vh)
 
 		var encoded []byte
 		switch msg.Type {

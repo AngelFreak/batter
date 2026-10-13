@@ -27,7 +27,7 @@ func startFakeSession(t *testing.T, fake *scrcpytest.ADB, opts SessionOptions) (
 	}
 	res := make(chan result, 1)
 	go func() {
-		s, err := newSession(adb, "FAKE", filepath.Join(fake.Dir, "scrcpy-server"), "3.3.4", opts, logger)
+		s, err := newSession(adb, "FAKE", filepath.Join(fake.Dir, "scrcpy-server"), ServerVersion, opts, logger)
 		res <- result{s, err}
 	}()
 	args, port := fake.WaitLaunch(t)
@@ -72,7 +72,7 @@ func assertVideoFlows(t *testing.T, s *Session, dev *scrcpytest.Device) {
 	t.Helper()
 	ch := s.SubscribeVideo("video-check")
 	defer s.UnsubscribeVideo("video-check")
-	scrcpytest.WritePacket(t, dev.Video, 1000|1<<62, []byte{0, 0, 0, 1, 0x65}) // an IDR keyframe
+	scrcpytest.WritePacket(t, dev.Video, 1000|scrcpytest.FlagKeyFrame, []byte{0, 0, 0, 1, 0x65}) // an IDR keyframe
 	if got := recv(t, ch, "video"); len(got) != 12+5 {
 		t.Fatalf("video packet = %d bytes, want 17", len(got))
 	}
@@ -82,7 +82,7 @@ func assertVideoFlows(t *testing.T, s *Session, dev *scrcpytest.Device) {
 }
 
 func TestServerArgsEnableOpusOutputAudioForFullSessionsOnly(t *testing.T) {
-	full := buildServerArgs(1, "3.3.4", fullOpts)
+	full := buildServerArgs(1, ServerVersion, fullOpts)
 	for _, want := range []string{"audio=true", "audio_codec=opus", "audio_source=output"} {
 		if !scrcpytest.HasArg(full, want) {
 			t.Errorf("full session args %v missing %s", full, want)
@@ -94,15 +94,15 @@ func TestServerArgsEnableOpusOutputAudioForFullSessionsOnly(t *testing.T) {
 	}
 	// Capturing "output" silences the phone, so grid thumbnails (nobody
 	// listening) must not capture.
-	if thumb := buildServerArgs(1, "3.3.4", TierOptions(TierThumbnail)); !scrcpytest.HasArg(thumb, "audio=false") {
+	if thumb := buildServerArgs(1, ServerVersion, TierOptions(TierThumbnail)); !scrcpytest.HasArg(thumb, "audio=false") {
 		t.Errorf("thumbnail args %v do not disable audio", thumb)
 	}
 }
 
 func TestSessionStreamsOpusAudioAlongsideVideo(t *testing.T) {
 	s, dev, _ := startFakeSession(t, scrcpytest.NewADB(t), fullOpts)
-	if s.DeviceName != "Fake Phone" || s.Width != 1080 || s.Height != 2400 {
-		t.Fatalf("video handshake = %q %dx%d", s.DeviceName, s.Width, s.Height)
+	if w, h := s.Size(); s.DeviceName != "Fake Phone" || w != scrcpytest.Width || h != scrcpytest.Height {
+		t.Fatalf("video handshake = %q %dx%d", s.DeviceName, w, h)
 	}
 
 	dev.WriteAudioHeader(t, scrcpytest.CodecOpus)
@@ -205,7 +205,7 @@ func TestManagerDropsAudioAfterItTookDownTheServer(t *testing.T) {
 		fullViewers:      make(map[string]int),
 		deviceLocks:      make(map[string]*sync.Mutex),
 		scrcpyServerPath: filepath.Join(fake.Dir, "scrcpy-server"),
-		scrcpyVersion:    "3.3.4",
+		scrcpyVersion:    ServerVersion,
 		logger:           logger,
 	}
 	t.Cleanup(m.Shutdown)

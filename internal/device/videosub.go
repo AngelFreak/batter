@@ -1,5 +1,7 @@
 package device
 
+import "encoding/binary"
+
 // Video fan-out is latency-first: a viewer that can't keep up skips ahead
 // to the next keyframe instead of queueing frames (which made remote
 // viewers on slow links run seconds behind). Each subscriber has a small
@@ -24,12 +26,13 @@ func newVideoSub() *videoSub {
 	return &videoSub{ch: make(chan []byte, videoSubBuffer), resync: true}
 }
 
-// packetFlags reads scrcpy's frame-meta flags: bit 63 config, bit 62 key.
+// packetFlags reads scrcpy's frame-meta flags (see PacketFlagConfig).
 func packetFlags(msg []byte) (config, key bool) {
 	if len(msg) < 12 {
 		return false, false
 	}
-	return msg[0]&0x80 != 0, msg[0]&0x40 != 0
+	flags := binary.BigEndian.Uint64(msg[0:8])
+	return flags&PacketFlagConfig != 0, flags&PacketFlagKeyFrame != 0
 }
 
 // broadcast delivers one packet to every subscriber without blocking.

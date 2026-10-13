@@ -4,6 +4,33 @@ import (
 	"encoding/binary"
 )
 
+// ServerVersion is the scrcpy-server release this package speaks. The server
+// refuses a client whose version string differs from its own, and the
+// framing below is that of scrcpy 4.0 and later.
+const ServerVersion = "5.0.1"
+
+// Flags in the first 8 bytes (big-endian) of every 12-byte packet header on
+// the video and audio sockets (scrcpy 4.0+). Below them is the PTS.
+const (
+	// PacketFlagSession marks a video session packet: the flags word, then
+	// width and height (u32 each) in place of PTS and size; no payload. One
+	// is sent before the first frame and again whenever the capture size
+	// changes (rotation). Never sent on audio.
+	PacketFlagSession  uint64 = 1 << 63
+	PacketFlagConfig   uint64 = 1 << 62
+	PacketFlagKeyFrame uint64 = 1 << 61
+	PacketPTSMask             = PacketFlagKeyFrame - 1
+)
+
+// ParseSessionPacket returns the video size carried by a 12-byte session
+// packet, or ok=false if header is not one.
+func ParseSessionPacket(header []byte) (width, height int, ok bool) {
+	if len(header) < 12 || binary.BigEndian.Uint64(header[0:8])&PacketFlagSession == 0 {
+		return 0, 0, false
+	}
+	return int(binary.BigEndian.Uint32(header[4:8])), int(binary.BigEndian.Uint32(header[8:12])), true
+}
+
 // Scrcpy control message types.
 const (
 	ControlTypeKeycode            = 0
@@ -18,7 +45,7 @@ const (
 	ControlTypeSetClipboard       = 9
 	ControlTypeSetScreenPowerMode = 10
 	ControlTypeRotateDevice       = 11
-	ControlTypeResetVideo         = 17 // scrcpy 3.x
+	ControlTypeResetVideo         = 17 // scrcpy 3.0+
 )
 
 // Clipboard copy-key constants for EncodeGetClipboard.

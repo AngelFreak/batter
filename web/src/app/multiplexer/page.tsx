@@ -7,6 +7,7 @@ import { getToken } from '@/lib/auth';
 import { MultiplexerInputHandler } from '@/lib/device-input-multiplexer';
 import { MultiplexerGrid } from '@/components/device/multiplexer-grid';
 import { useNoSwipeNavigation } from '@/lib/use-no-swipe-navigation';
+import { NavBar } from '@/components/device/nav-bar';
 
 export default function MultiplexerPage() {
   useNoSwipeNavigation();
@@ -217,6 +218,9 @@ export default function MultiplexerPage() {
           </div>
         )}
       </div>
+
+      {/* Navigation buttons, broadcast to every device */}
+      {active && <NavBar onNav={(action) => multiplexerRef.current?.nav(action)} />}
 
       {/* Text input bar */}
       {active && showTextInput && (

@@ -10,10 +10,10 @@ func packet(config, key bool, seq uint32) []byte {
 	msg := make([]byte, 16)
 	var flags uint64
 	if config {
-		flags |= 1 << 63
+		flags |= 1 << 62
 	}
 	if key {
-		flags |= 1 << 62
+		flags |= 1 << 61
 	}
 	binary.BigEndian.PutUint64(msg, flags)
 	binary.BigEndian.PutUint32(msg[8:], 4)
