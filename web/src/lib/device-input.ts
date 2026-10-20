@@ -3,6 +3,7 @@ import { getToken } from "./auth";
 import { Reconnector } from "./reconnect";
 import { WheelGestures } from "./wheel-gesture";
 import { NavAction, navMessages } from "./device-nav";
+import { SWIPE_STEP_MS, SwipeDirection, swipePath } from "./swipe-pad";
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "";
 
@@ -160,6 +161,7 @@ export class DeviceInputHandler {
 
   // Two-finger swipes: vertical scrolls, horizontal drags (see WheelGestures).
   private wheelGestures = new WheelGestures((msg) => this.send(msg));
+  private swipeTimer: ReturnType<typeof setTimeout> | null = null;
 
   private handleWheel = (e: WheelEvent) => {
     e.preventDefault();
@@ -247,6 +249,7 @@ export class DeviceInputHandler {
 
   private detachListeners() {
     this.wheelGestures.cancel();
+    this.cancelSwipe();
     this.canvas.removeEventListener("mousedown", this.handleMouseDown);
     this.canvas.removeEventListener("mousemove", this.handleMouseMove);
     this.canvas.removeEventListener("mouseup", this.handleMouseUp);
@@ -266,6 +269,28 @@ export class DeviceInputHandler {
 
   sendScreenOff() {
     this.send({ type: "screen_off" });
+  }
+
+  /**
+   * Swipes a finger across the screen (from the swipe pad), played out over
+   * time so Android sees a real swipe. A press while one is going is ignored.
+   */
+  swipe(dir: SwipeDirection) {
+    if (this.swipeTimer !== null) return;
+    const path = swipePath(dir);
+    const step = (i: number) => {
+      const p = path[i];
+      this.send({ type: "touch", action: p.action, x: p.x, y: p.y, pointer_id: 0, pressure: p.action === 1 ? 0 : 1.0 });
+      this.swipeTimer = i + 1 < path.length ? setTimeout(() => step(i + 1), SWIPE_STEP_MS) : null;
+    };
+    step(0);
+  }
+
+  private cancelSwipe() {
+    if (this.swipeTimer !== null) {
+      clearTimeout(this.swipeTimer);
+      this.swipeTimer = null;
+    }
   }
 
   /** Press an on-screen navigation button (Back, Home, Recents, All apps). */

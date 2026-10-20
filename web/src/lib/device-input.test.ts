@@ -41,3 +41,56 @@ test('control socket stops retrying after disconnect()', () => {
   mock.timers.tick(60_000);
   assert.equal(FakeWebSocket.instances.length, 1);
 });
+
+// Node 20's mock clock doesn't run a timeout scheduled during the same
+// tick(), so time is advanced in small steps.
+const elapse = (ms: number) => {
+  for (let t = 0; t < ms; t += 5) mock.timers.tick(5);
+};
+
+const touches = (ws: FakeWebSocket) =>
+  ws.sent.map((s) => JSON.parse(s)).filter((m: { type: string }) => m.type === 'touch') as {
+    action: number;
+    x: number;
+    y: number;
+  }[];
+
+test('a pad swipe is played out over time like a finger, then lifted', () => {
+  const h = new DeviceInputHandler(fakeCanvas());
+  h.connect('A');
+  last().open();
+  h.swipe('up');
+  assert.deepEqual(touches(last()).map((t) => t.action), [0], 'only the finger down at once');
+  elapse(1_000);
+  const sent = touches(last());
+  assert.equal(sent[sent.length - 1].action, 1);
+  assert.ok(sent.slice(1, -1).every((t) => t.action === 2));
+  assert.ok(sent[0].y > sent[sent.length - 1].y, 'not upward');
+  h.disconnect();
+});
+
+test('pressing the pad again mid-swipe does not start a second finger', () => {
+  const h = new DeviceInputHandler(fakeCanvas());
+  h.connect('A');
+  last().open();
+  h.swipe('up');
+  h.swipe('left');
+  elapse(1_000);
+  assert.equal(touches(last()).filter((t) => t.action === 0).length, 1);
+  h.swipe('left'); // the first one is over, so this one goes
+  elapse(1_000);
+  assert.equal(touches(last()).filter((t) => t.action === 0).length, 2);
+  h.disconnect();
+});
+
+test('a swipe stops when the viewer disconnects', () => {
+  const h = new DeviceInputHandler(fakeCanvas());
+  h.connect('A');
+  const ws = last();
+  ws.open();
+  h.swipe('down');
+  h.disconnect();
+  const before = ws.sent.length;
+  elapse(1_000);
+  assert.equal(ws.sent.length, before);
+});

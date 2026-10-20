@@ -8,6 +8,8 @@ import { AudioControls, type AudioView } from '@/lib/audio-controls';
 import { fetchScreenshot, pushFile, installAPK } from '@/lib/api';
 import { useNoSwipeNavigation } from '@/lib/use-no-swipe-navigation';
 import { NavBar } from './nav-bar';
+import { SwipePad } from './swipe-pad';
+import { DEFAULT_VIEWER_PREFS, loadViewerPrefs, saveViewerPrefs, type ViewerPrefs } from '@/lib/viewer-prefs';
 
 interface DeviceViewerProps {
   serial: string;
@@ -35,6 +37,17 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
   const [dragging, setDragging] = useState(false);
   const [showClipboard, setShowClipboard] = useState(false);
   const [audio, setAudio] = useState<AudioView>({ state: 'connecting', muted: true, volume: 1 });
+  // Nav buttons and the swipe pad: this browser's choice, read after mount
+  // (localStorage isn't there during server rendering).
+  const [prefs, setPrefs] = useState<ViewerPrefs>(DEFAULT_VIEWER_PREFS);
+  useEffect(() => setPrefs(loadViewerPrefs()), []);
+  const updatePrefs = useCallback((change: Partial<ViewerPrefs>) => {
+    setPrefs((p) => {
+      const next = { ...p, ...change };
+      saveViewerPrefs(next);
+      return next;
+    });
+  }, []);
   // Read through a ref so a new callback identity doesn't recreate the player.
   const onStreamLostRef = useRef(onStreamLost);
   onStreamLostRef.current = onStreamLost;
@@ -257,6 +270,24 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
             Frame
           </button>
           <button
+            onClick={() => updatePrefs({ navButtons: !prefs.navButtons })}
+            title="Back, Home, Recents and All apps under the screen"
+            className={`px-2 py-1 text-[10px] rounded ${
+              prefs.navButtons ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+            }`}
+          >
+            Buttons
+          </button>
+          <button
+            onClick={() => updatePrefs({ swipePad: !prefs.swipePad })}
+            title="A floating pad that swipes the screen up, down, left or right"
+            className={`px-2 py-1 text-[10px] rounded ${
+              prefs.swipePad ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+            }`}
+          >
+            Swipe pad
+          </button>
+          <button
             onClick={() => setShowTextInput(t => !t)}
             className={`px-2 py-1 text-[10px] rounded ${
               showTextInput ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
@@ -338,6 +369,17 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
             } : {}),
           }}
         />
+        {prefs.swipePad && (
+          <SwipePad
+            boundsRef={containerRef}
+            pos={prefs.padPos}
+            // While dragging only the position moves; it's saved when dropped.
+            onMove={(padPos) => setPrefs((p) => ({ ...p, padPos }))}
+            onMoved={(padPos) => updatePrefs({ padPos })}
+            onSwipe={(dir) => inputRef.current?.swipe(dir)}
+            disabled={controlStatus !== 'connected'}
+          />
+        )}
         {toast && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 bg-gray-800/90 text-gray-200 text-xs rounded-lg border border-gray-700 z-30">
             {toast}
@@ -345,7 +387,9 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
         )}
       </div>
 
-      <NavBar onNav={(action) => inputRef.current?.nav(action)} disabled={controlStatus !== 'connected'} />
+      {prefs.navButtons && (
+        <NavBar onNav={(action) => inputRef.current?.nav(action)} disabled={controlStatus !== 'connected'} />
+      )}
 
       {/* Clipboard panel */}
       {showClipboard && (
