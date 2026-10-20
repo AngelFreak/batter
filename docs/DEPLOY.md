@@ -162,7 +162,8 @@ network is off and **Admin → Phone network** says so.
 ### Keep the box's hands off NIC2
 
 While Batter is stopped, NIC2 is back on the box. If something on the box
-then brings it up (NetworkManager, netplan, ifupdown), the box gets an
+then brings it up (NetworkManager, systemd-networkd, netplan, ifupdown), the
+box gets an
 address on the phones' switch (at least an IPv6 link-local one), and phones
 can reach the box directly: its SSH, Batter's HTTPS, anything listening.
 So the box must not manage NIC2 at all. **Admin → Phone network** warns if
@@ -186,6 +187,22 @@ Find NIC2's name and MAC with `ip link`. Then:
 - **netplan** (Ubuntu Server): make sure no file in `/etc/netplan/` mentions
   NIC2, and that no `match:` block (such as `match: {name: "en*"}` with
   `dhcp4: true`) catches it. Then `sudo netplan apply`.
+
+- **systemd-networkd** (Ubuntu Server and others; netplan writes its config
+  for it): check with `networkctl list`. If NIC2's SETUP column says anything
+  but `unmanaged`, a `.network` file matches it, even when nothing you wrote
+  names it: `networkctl status <NIC2>` shows which (**Network File**). On
+  some boxes it's `/run/systemd/network/zzzz-dracut-default.network`, which
+  the initramfs leaves behind and which runs DHCP on every physical port. It
+  is recreated at each boot, so don't edit it; instead add a file that sorts
+  first and marks NIC2 unmanaged by its MAC:
+
+  ```bash
+  printf '[Match]\nMACAddress=aa:bb:cc:dd:ee:ff\n\n[Link]\nUnmanaged=yes\n' | sudo tee /etc/systemd/network/00-batter-phones.network
+  sudo networkctl reload
+  sudo ip link set <NIC2> down
+  networkctl list <NIC2>   # SETUP shows "unmanaged"
+  ```
 
 - **ifupdown** (`/etc/network/interfaces`): remove any `auto`/`allow-hotplug`
   and `iface` lines for NIC2.
@@ -225,11 +242,25 @@ that subnet is used elsewhere on your networks, set `PHONE_LAN` and
    as on USB.
 4. Choose its VPN profile under **Edit Device → Internet**.
 
-**After a phone restarts**, Android turns adb over the network off again.
-The phone keeps its network and VPN, but Batter can't control it and shows
-**Needs USB re-provision**: plug it into USB, click **Switch to ethernet**
-in Edit Device, and put the adapter back. A phone on USB is always
-controllable over USB.
+**Unplugging and re-plugging an adapter** is fine: when the adapter asks
+for its address again, Batter drops its old adb connection to the phone and
+makes a new one, so live view works again within a few seconds.
+
+**After a phone restarts**, Android turns adb over the network off again, and
+only a computer on USB can turn it back on (without root there is no way to
+make it stick). The phone keeps its network and VPN, but Batter can't control
+it: its card shows **Restarted · needs USB**, the Devices page lists it, and
+its live view shows the steps instead of the screen. Click **Reconnect** and
+follow them; each step turns green when Batter sees it done:
+
+1. Take the adapter out and plug the phone into USB (tap **Allow** if the
+   phone asks to allow USB debugging).
+2. Click **Switch to ethernet**.
+3. Unplug USB and put the adapter back. The live view starts by itself.
+
+A phone on USB is always controllable over USB. To keep restarts rare, turn
+off scheduled restarts on the phone (Samsung: **Device care → Auto
+optimisation → Auto restart**).
 
 ### The phone switch: use a managed switch with port isolation
 
@@ -264,7 +295,12 @@ the switch, so it keeps isolating after the app is gone.
 4. Leave the port that goes to the box **not isolated**, or nothing reaches
    the box.
 5. Move the switch to the box: the uplink port to the box's phone network
-   port, phones on the isolated ports.
+   port, phones on the isolated ports. **Nothing else goes on this switch**:
+   not your router or home network. A router there hands the phones addresses
+   and internet directly, past Batter and the VPN.
+6. Give the switch its own power (the Flex Mini takes a USB-C charger). If it
+   was powered over PoE from the network you adopted it on, it goes dark when
+   you unplug that cable.
 
 The app will show the switch as offline from then on. That's expected;
 isolation keeps working. If you ever need to change it, plug the switch back
@@ -387,6 +423,7 @@ echo "net.ipv4.tcp_notsent_lowat = 131072" | sudo tee /etc/sysctl.d/90-batter-la
 | `batter` container isn't `healthy` | `docker compose logs batter` — a database or migration error is printed at startup. |
 | Phone on ethernet gets no address | Check the adapter's link light, and that the switch is on the port picked under **Admin → Phone network** and that page says it's on. `docker compose logs batter \| grep lan` shows DHCP and firewall errors; if the firewall can't be installed, Batter keeps the port down rather than run it open. |
 | **Admin → Phone network** says unavailable | The batter container needs `pid: host` (it's in the shipped `docker-compose.yml`); check you haven't overridden it. |
-| **Admin → Phone network** warns the box manages the port | Something on the box (NetworkManager, netplan, ifupdown) brings NIC2 up. Set it unmanaged as in "Keep the box's hands off NIC2". |
-| Phone shows **Needs USB re-provision** | It restarted. Plug it into USB and click **Switch to ethernet** in Edit Device. |
+| **Admin → Phone network** warns the box manages the port | Something on the box (NetworkManager, systemd-networkd, netplan, ifupdown) brings NIC2 up. Set it unmanaged as in "Keep the box's hands off NIC2". |
+| Nothing on the switch gets an address | `docker compose exec batter cat /sys/class/net/phonelan/carrier` prints `0`: no cable link reaches the box. Check the switch has power and its uplink is in the box's phone network port, not the box's own port. |
+| Phone shows **Restarted · needs USB** | It restarted, which turns adb over the network off. Click **Reconnect** and follow the steps (USB, **Switch to ethernet**, adapter back). |
 | Phone on ethernet has no internet | It needs a VPN profile (Edit Device → Internet), and that profile's tunnel must be up (Admin → VPN, **Check exit IP**). |
