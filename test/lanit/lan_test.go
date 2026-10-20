@@ -45,6 +45,8 @@
 //     5555 work; profile switches and removals apply at once;
 //   - switching the port to nic3 gives nic2 back to the box down and phones
 //     keep working; a re-plugged port (same MAC) is taken again;
+//   - a phone whose adapter is plugged in again (a fresh DHCP request) gets
+//     its dead adb connection replaced; a lease renewal leaves it alone;
 //   - a downed tunnel or wiped routing blocks only that phone;
 //   - after a restart Batter takes the port again and all checks hold;
 //   - turning the network off gives the port back down and leaves no table,
@@ -79,6 +81,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XpertaDK/batter/internal/lan"
 	"golang.org/x/crypto/curve25519"
 )
 
@@ -725,6 +728,71 @@ func TestPhonesOnTheLAN(t *testing.T) {
 		if err != nil || strings.TrimSpace(out) != "PHONE-OK" {
 			t.Fatalf("Batter -> phone1:5555: %q %v", out, err)
 		}
+	})
+
+	step(t, "a phone's adapter plugged in again gets a fresh adb connection", func(t *testing.T) {
+		addr := phone1IP + ":5555"
+		fakeadb := func(script string) string {
+			t.Helper()
+			out, err := inBatter("sh", "-c", script)
+			if err != nil {
+				t.Fatalf("%s: %v %s", script, err, out)
+			}
+			return strings.TrimSpace(out)
+		}
+		lastSeen := func() string {
+			out, err := compose(time.Minute, "exec", "-T", "postgres", "psql", "-U", "batter", "-Atc",
+				"SELECT last_seen_at FROM lan_leases WHERE ip = '"+phone1IP+"'")
+			if err != nil {
+				t.Fatalf("%v %s", err, out)
+			}
+			return strings.TrimSpace(out)
+		}
+		disconnects := func() string {
+			return fakeadb("grep -cx 'disconnect " + addr + "' /tmp/fakeadb/calls || true")
+		}
+		if got := fakeadb("cat /tmp/fakeadb/connected"); got != addr {
+			t.Fatalf("FAKE01 connected at %q, want %s", got, addr)
+		}
+
+		// The phone's link goes: Batter's adb connection to it is dead, but
+		// adb still lists it. A routine lease renewal doesn't touch it (a
+		// live session could be on it).
+		fakeadb("echo " + addr + " > /tmp/fakeadb/dead")
+		before, seen := disconnects(), lastSeen()
+		if out, err := inPhone("phone1", "pkill", "-USR1", "udhcpc"); err != nil {
+			t.Fatalf("renew: %v %s", err, out)
+		}
+		waitFor(t, 30*time.Second, "phone1's renewal", func() bool { return lastSeen() != seen })
+		// The ACK triggers a pass; give it and the next one time to act.
+		time.Sleep(2*lan.DefaultInterval + time.Second)
+		if got := disconnects(); got != before {
+			t.Fatal("a renewal dropped the adb connection")
+		}
+
+		// Plugged in again: the adapter asks for its address afresh, and
+		// Batter replaces the dead connection.
+		if out, err := inPhone("phone1", "sh", "-c",
+			"pkill -USR2 udhcpc; ip link set eth0 down; sleep 1; ip link set eth0 up; pkill -USR1 udhcpc"); err != nil {
+			t.Fatalf("replug: %v %s", err, out)
+		}
+		eventually(t, 30*time.Second, func() error {
+			if got := disconnects(); got == before {
+				return fmt.Errorf("dead connection not dropped")
+			}
+			if out, _ := inBatter("sh", "-c", "test -e /tmp/fakeadb/dead && echo dead || cat /tmp/fakeadb/connected"); strings.TrimSpace(out) != addr {
+				return fmt.Errorf("not reconnected: %q", out)
+			}
+			_, dev := api.do(t, "GET", "/api/v1/devices/FAKE01", nil)
+			if !strings.Contains(dev, `"connection":"lan"`) {
+				return fmt.Errorf("FAKE01 not on the LAN: %s", dev)
+			}
+			return nil
+		})
+		if out, err := inBatter("adb", "-s", addr, "shell", "getprop", "ro.serialno"); err != nil || strings.TrimSpace(out) != "FAKE01" {
+			t.Fatalf("adb over the new connection: %q %v", out, err)
+		}
+		mustExit(t, "phone1", ipA, "after the re-plug")
 	})
 
 	step(t, "switching a phone's profile takes effect at once", func(t *testing.T) {

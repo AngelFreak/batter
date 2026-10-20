@@ -16,6 +16,9 @@
 // address (ip:port) its adbd listens there, `adb connect <addr>` succeeds
 // and the phone is then also reachable as -s <addr>. $FAKEADB_DIR/unplugged
 // takes it off USB. `shell getprop ro.serialno` answers FAKE01 on either.
+// $FAKEADB_DIR/dead holding that address makes the LAN connection dead, as
+// when the phone's adapter is unplugged: adb still lists it, but commands
+// on it fail, until `adb disconnect` drops it.
 // Every call is logged to $FAKEADB_DIR/calls, so tests can check which
 // transport a command went to.
 //
@@ -50,6 +53,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "adb: device '%s' not found\n", args[1])
 			os.Exit(1)
 		}
+		if args[1] == state("dead") {
+			fmt.Fprintln(os.Stderr, "error: closed")
+			os.Exit(1)
+		}
 		args = args[2:]
 	}
 	if len(args) == 0 {
@@ -73,6 +80,7 @@ func main() {
 		}
 	case "disconnect":
 		_ = os.Remove(filepath.Join(dir, "connected"))
+		_ = os.Remove(filepath.Join(dir, "dead"))
 	case "tcpip":
 		_ = os.WriteFile(filepath.Join(dir, "tcpip"), []byte(args[len(args)-1]), 0o644)
 		fmt.Println("restarting in TCP mode port: " + args[len(args)-1])

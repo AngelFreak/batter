@@ -64,6 +64,7 @@ type Controller struct {
 	reprov    map[string]netip.Addr // serial -> address of a phone needing USB re-provisioning
 	connected map[string]string     // transport -> serial, as verified by asking the phone
 	onLAN     map[string]bool       // serials whose adb calls go over the LAN
+	rejoined  map[string]bool       // adb addresses whose adapter came back onto the network since the last pass
 	rules     string                // the phones the firewall was last applied for
 	appliedAt time.Time
 	fwErr     error
@@ -104,9 +105,23 @@ func (c *Controller) Run(ctx context.Context) {
 }
 
 // DHCPServer returns the LAN's DHCP server; each lease it hands out
-// triggers a pass, so a new phone is found right away.
+// triggers a pass, so a new phone is found right away. An adapter that
+// rejoined the network (plugged in again) has its adb connection replaced
+// in that pass: the phone dropped its end when the link went, but adb
+// still lists the connection, and commands on it hang.
 func (c *Controller) DHCPServer() *DHCP {
-	return &DHCP{Net: c.Net, Leases: c.Leases, OnLease: func(Lease) { c.Trigger() }, Logger: c.Logger}
+	onLease := func(l Lease, rejoined bool) {
+		if rejoined {
+			c.mu.Lock()
+			if c.rejoined == nil {
+				c.rejoined = map[string]bool{}
+			}
+			c.rejoined[c.addr(l)] = true
+			c.mu.Unlock()
+		}
+		c.Trigger()
+	}
+	return &DHCP{Net: c.Net, Leases: c.Leases, OnLease: onLease, Logger: c.Logger}
 }
 
 // Trigger asks for a pass soon, without waiting for it.
@@ -189,6 +204,10 @@ func (c *Controller) recent() time.Duration {
 
 // discover matches each recently seen adapter to the phone behind it.
 func (c *Controller) discover(ctx context.Context) error {
+	c.mu.Lock()
+	rejoined := c.rejoined
+	c.rejoined = nil
+	c.mu.Unlock()
 	leases, err := c.Leases.List(ctx)
 	if err != nil {
 		return err
@@ -215,7 +234,12 @@ func (c *Controller) discover(ctx context.Context) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i] = c.probe(ctx, l, state[c.addr(l)])
+			st := state[c.addr(l)]
+			if rejoined[c.addr(l)] && st == "device" {
+				c.Logger.Info("lan: adapter plugged in again; replacing its adb connection", "addr", c.addr(l), "serial", l.Serial)
+				st = "stale"
+			}
+			results[i] = c.probe(ctx, l, st)
 		}()
 	}
 	wg.Wait()
@@ -278,7 +302,7 @@ func (c *Controller) probe(ctx context.Context, l Lease, state string) probeResu
 	r := probeResult{lease: l}
 	if state != "device" {
 		if state != "" {
-			// offline/unauthorized: start over rather than wait on it.
+			// offline/unauthorized/stale: start over rather than wait on it.
 			_ = c.ADB.Disconnect(ctx, addr)
 			c.forget(addr)
 		}

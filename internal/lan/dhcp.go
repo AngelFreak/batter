@@ -24,7 +24,10 @@ type DHCP struct {
 	Leases    *Leases
 	LeaseTime time.Duration // 0 = DefaultLeaseTime
 	// OnLease is called after an adapter is given (ACKed) its address.
-	OnLease func(Lease)
+	// rejoined says the adapter asked without an address in use: it has
+	// just come (back) onto the network, as when it's plugged in again,
+	// rather than renewing the lease it holds.
+	OnLease func(l Lease, rejoined bool)
 	Logger  *slog.Logger
 }
 
@@ -115,7 +118,7 @@ func (d *DHCP) Handle(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4) {
 	if reply == dhcpv4.MessageTypeAck {
 		d.Logger.Debug("lan: address leased", "mac", mac, "ip", lease.IP, "serial", lease.Serial)
 		if d.OnLease != nil {
-			d.OnLease(lease)
+			d.OnLease(lease, req.ClientIPAddr == nil || req.ClientIPAddr.IsUnspecified())
 		}
 	} else if reply == dhcpv4.MessageTypeNak {
 		d.Logger.Info("lan: refused an address the adapter doesn't own", "mac", mac, "requested", requestedAddr(req))

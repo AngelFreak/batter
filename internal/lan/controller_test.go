@@ -2,6 +2,7 @@ package lan
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -14,11 +15,12 @@ import (
 
 // fakeADB is adb with phones at addresses: phones[addr] = serial.
 type fakeADB struct {
-	mu         sync.Mutex
-	phones     map[string]string
-	connected  map[string]bool
-	transports map[string]string // serial -> transport, as set by the controller
-	serialNos  int
+	mu          sync.Mutex
+	phones      map[string]string
+	connected   map[string]bool
+	transports  map[string]string // serial -> transport, as set by the controller
+	serialNos   int
+	disconnects []string
 }
 
 func (f *fakeADB) ListTransports(context.Context) ([]device.ADBDevice, error) {
@@ -49,6 +51,7 @@ func (f *fakeADB) Connect(_ context.Context, addr string) error {
 func (f *fakeADB) Disconnect(_ context.Context, addr string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.disconnects = append(f.disconnects, addr)
 	delete(f.connected, addr)
 	return nil
 }
@@ -170,6 +173,54 @@ func TestAnAdapterMovedToAnotherPhoneIsReidentified(t *testing.T) {
 	}
 	// (The fake `ip rule show` lists nothing, so only the add shows.)
 	sys.index(t, "ip rule add from 10.77.0.100 iif phonelan lookup 51821")
+}
+
+// A phone whose adapter was unplugged and plugged back in has dropped its
+// end of the adb connection, but adb still lists it (the box's end stays
+// open) and every command on it hangs. The adapter's fresh DHCP request
+// says so: the old connection is dropped and a new one made.
+func TestARejoinedAdapterGetsAFreshADBConnection(t *testing.T) {
+	const addr = "10.77.0.100:5555"
+	adb := &fakeADB{phones: map[string]string{addr: "PHONE1"}}
+	c, _ := newController(t, adb, fixedProfiles{})
+	ctx := context.Background()
+	lease, err := c.Leases.Allocate(ctx, "02:00:00:00:00:0a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Pass(ctx)
+	adb.disconnects = nil
+
+	c.DHCPServer().OnLease(lease, true)
+	c.Pass(ctx)
+	c.Pass(ctx) // once only
+	if fmt.Sprint(adb.disconnects) != "["+addr+"]" {
+		t.Fatalf("disconnects %v, want the old connection dropped once", adb.disconnects)
+	}
+	if !adb.connected[addr] || adb.transport("PHONE1") != addr {
+		t.Fatalf("not reconnected: connected=%v transport=%q", adb.connected, adb.transport("PHONE1"))
+	}
+	if adb.serialNos != 2 {
+		t.Fatalf("asked for the serial %d times, want the new connection identified", adb.serialNos)
+	}
+}
+
+// A routine renewal leaves a working connection (and a live session on it)
+// alone.
+func TestARenewingAdapterKeepsItsADBConnection(t *testing.T) {
+	adb := &fakeADB{phones: map[string]string{"10.77.0.100:5555": "PHONE1"}}
+	c, _ := newController(t, adb, fixedProfiles{})
+	ctx := context.Background()
+	lease, err := c.Leases.Allocate(ctx, "02:00:00:00:00:0a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Pass(ctx)
+	c.DHCPServer().OnLease(lease, false)
+	c.Pass(ctx)
+	if len(adb.disconnects) != 0 {
+		t.Fatalf("connection dropped on a renewal: %v", adb.disconnects)
+	}
 }
 
 // A phone already connected isn't asked for its serial again every pass.

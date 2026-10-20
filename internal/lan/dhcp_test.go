@@ -141,6 +141,21 @@ func request(t *testing.T, hw net.HardwareAddr, ip net.IP, server net.IP) *dhcpv
 	return m
 }
 
+// renew is a client renewing the address it has (RFC 2131 RENEWING): its
+// address goes in ciaddr, with no requested-address option.
+func renew(t *testing.T, hw net.HardwareAddr, ip net.IP) *dhcpv4.DHCPv4 {
+	t.Helper()
+	m, err := dhcpv4.New(
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest),
+		dhcpv4.WithHwAddr(hw),
+		dhcpv4.WithClientIP(ip),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
 func newServer(t *testing.T, db *pgxpool.Pool, n Network) (*DHCP, *sentConn) {
 	t.Helper()
 	return &DHCP{Net: n, Leases: &Leases{DB: db, Net: n}, Logger: quiet}, &sentConn{}
@@ -208,7 +223,7 @@ func TestRequestIsAckedForItsOwnAddressOnly(t *testing.T) {
 	srv, conn := newServer(t, db, testNet(t, "10.77.0.100-10.77.0.200"))
 	var acked []Lease
 	var mu sync.Mutex
-	srv.OnLease = func(l Lease) {
+	srv.OnLease = func(l Lease, _ bool) {
 		mu.Lock()
 		acked = append(acked, l)
 		mu.Unlock()
@@ -358,5 +373,31 @@ func TestParseNetwork(t *testing.T) {
 		if _, err := ParseNetwork(bad[0], bad[1]); err == nil {
 			t.Errorf("ParseNetwork(%q, %q) accepted", bad[0], bad[1])
 		}
+	}
+}
+
+// A client that asks without an address in use has just (re)joined the
+// network, as when its adapter is plugged in; one renewing the address it
+// has hasn't. Batter's connections to a rejoined phone are stale.
+func TestLeasesSayWhetherTheClientRejoined(t *testing.T) {
+	db := testDB(t)
+	srv, conn := newServer(t, db, testNet(t, "10.77.0.100-10.77.0.200"))
+	var rejoined []bool
+	srv.OnLease = func(_ Lease, r bool) { rejoined = append(rejoined, r) }
+	hw := mac(t, "02:00:00:00:00:01")
+	lan := net.ParseIP("10.77.0.1")
+
+	srv.Handle(conn, bcast, discover(t, hw))
+	ip := conn.last(t).msg.YourIPAddr
+	srv.Handle(conn, bcast, request(t, hw, ip, lan)) // SELECTING
+	srv.Handle(conn, &net.UDPAddr{IP: ip, Port: 68}, renew(t, hw, ip))
+	srv.Handle(conn, bcast, request(t, hw, ip, nil)) // INIT-REBOOT: plugged in again
+
+	if m := conn.last(t).msg; m.MessageType() != dhcpv4.MessageTypeAck {
+		t.Fatalf("last reply %s, want ACK", m.MessageType())
+	}
+	want := []bool{true, false, true}
+	if fmt.Sprint(rejoined) != fmt.Sprint(want) {
+		t.Fatalf("rejoined %v, want %v (select, renew, init-reboot)", rejoined, want)
 	}
 }
