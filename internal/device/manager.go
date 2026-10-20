@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -119,8 +120,8 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}, nil
 }
 
-// ADB returns the manager's adb client, for features (reverse tethering)
-// that drive devices outside of scrcpy sessions.
+// ADB returns the manager's adb client, for features (the phone LAN) that
+// drive devices outside of scrcpy sessions.
 func (m *Manager) ADB() *ADB {
 	return m.adb
 }
@@ -138,10 +139,14 @@ func (m *Manager) ListDevices(ctx context.Context) ([]DeviceInfo, error) {
 	var result []DeviceInfo
 	for _, d := range devices {
 		info := DeviceInfo{
-			Serial:  d.Serial,
-			State:   d.State,
-			Model:   d.Model,
-			Product: d.Product,
+			Serial:     d.Serial,
+			State:      d.State,
+			Model:      d.Model,
+			Product:    d.Product,
+			Connection: "usb",
+		}
+		if ap, err := netip.ParseAddrPort(d.Transport); err == nil {
+			info.Connection, info.LANAddress = "lan", ap.Addr().String()
 		}
 		if s, ok := m.sessions[d.Serial]; ok {
 			info.HasSession = true
@@ -211,7 +216,7 @@ func (m *Manager) rememberAudioFailureLocked(serial string, s *Session) {
 
 // killDeviceServer force-kills any lingering scrcpy-server on the device and
 // removes scrcpy's reverse tunnels so a new session can bind its abstract
-// socket. Other tunnels (reverse tethering) are left in place.
+// socket. Other tunnels are left in place.
 func (m *Manager) killDeviceServer(ctx context.Context, serial string) {
 	_, _ = m.adb.Shell(ctx, serial, "pkill", "-9", "-f", "app_process.*scrcpy")
 	specs, err := m.adb.ListReverse(ctx, serial)
@@ -529,9 +534,16 @@ type DeviceInfo struct {
 	// viewers; the latest choice wins).
 	SessionQuality Quality    `json:"session_quality,omitempty"`
 	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
-	// VPNProfileID is set when the device is tethered, through that profile.
+	// VPNProfileID is set when the device has internet, through that profile.
 	VPNProfileID   string `json:"vpn_profile_id,omitempty"`
 	VPNProfileName string `json:"vpn_profile_name,omitempty"`
+	// Connection is how adb reaches the device: "usb" or "lan" (ethernet
+	// adapter, adb over TCP at LANAddress).
+	Connection string `json:"connection,omitempty"`
+	LANAddress string `json:"lan_address,omitempty"`
+	// NeedsReprovision marks a LAN phone whose adb over TCP is off (it
+	// rebooted): it must be switched on again over USB.
+	NeedsReprovision bool `json:"needs_reprovision,omitempty"`
 }
 
 // ValidateDevice checks whether a device is reachable via ADB and returns its state.

@@ -17,6 +17,7 @@ const adminItems = [
   { href: '/admin/users', label: 'Users', icon: '👤' },
   { href: '/admin/user-groups', label: 'Teams', icon: '👥' },
   { href: '/admin/vpn', label: 'VPN', icon: '🔒' },
+  { href: '/admin/phone-network', label: 'Phone network', icon: '🔌' },
 ];
 
 export function Sidebar() {

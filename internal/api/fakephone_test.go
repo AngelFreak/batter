@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -129,5 +130,79 @@ func TestUpgradeValidatesAndAppliesQuality(t *testing.T) {
 	// No body: the default level, as before.
 	if w := env.do(t, "admin", "POST", path, ""); w.Code != http.StatusOK {
 		t.Fatalf("upgrade without a body: %d %s", w.Code, w.Body.String())
+	}
+}
+
+const fakeLANAddr = "10.77.0.100:5555"
+
+// moveFakePhoneToLAN simulates the phone's move from USB to an ethernet
+// adapter: off USB, its adbd reachable at fakeLANAddr.
+func moveFakePhoneToLAN(t *testing.T, state string) {
+	t.Helper()
+	for name, content := range map[string]string{"lan": fakeLANAddr, "unplugged": ""} {
+		if err := os.WriteFile(filepath.Join(state, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// adbCalls returns the fake's logged invocations that name a device.
+func adbCalls(t *testing.T, state string) []string {
+	t.Helper()
+	b, _ := os.ReadFile(filepath.Join(state, "calls"))
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, "-s ") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// A phone on the LAN is driven entirely over its TCP transport, scrcpy's
+// adb reverse tunnel included, while the API keeps naming it by serial.
+func TestSessionOnALANPhoneRunsOverItsTCPTransport(t *testing.T) {
+	state := useFakePhone(t)
+	env := newTestEnv(t)
+	moveFakePhoneToLAN(t, state)
+	if err := env.dm.ADB().Connect(context.Background(), fakeLANAddr); err != nil {
+		t.Fatal(err)
+	}
+	env.dm.ADB().SetTransport(fakeSerial, fakeLANAddr)
+	if w := env.do(t, "admin", "POST", "/api/v1/devices", `{"serial":"`+fakeSerial+`"}`); w.Code != http.StatusCreated {
+		t.Fatalf("register: %d", w.Code)
+	}
+
+	srv := env.startFakeSession(t)
+	conn := env.dialWS(t, srv, "admin", "video")
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("no video over the LAN transport: %v", err)
+		}
+		if len(msg) >= 12 && msg[0]&0x40 != 0 {
+			break
+		}
+	}
+
+	calls := adbCalls(t, state)
+	reversed := false
+	for _, c := range calls {
+		if !strings.HasPrefix(c, "-s "+fakeLANAddr+" ") {
+			t.Errorf("adb call not on the LAN transport: %q", c)
+		}
+		reversed = reversed || strings.HasPrefix(c, "-s "+fakeLANAddr+" reverse localabstract:scrcpy_")
+	}
+	if !reversed {
+		t.Fatalf("scrcpy's reverse tunnel wasn't set up over the LAN transport: %q", calls)
+	}
+
+	w := env.do(t, "admin", "GET", "/api/v1/devices/"+fakeSerial, "")
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, `"status":"connected"`) ||
+		!strings.Contains(body, `"connection":"lan"`) || !strings.Contains(body, `"lan_address":"10.77.0.100"`) {
+		t.Fatalf("device: %d %s", w.Code, body)
 	}
 }

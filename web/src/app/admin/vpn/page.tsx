@@ -172,10 +172,11 @@ export default function AdminVPNPage() {
       <div className="flex-1 overflow-auto">
         <div className="max-w-4xl mx-auto p-6 space-y-4">
           <p className="text-xs text-gray-400">
-            Phones with internet sharing on reach the internet through the VPN profile chosen for them,
-            and only through it. Nothing else uses these tunnels: Batter, adb and the host keep their
-            normal route. When a profile is disabled or its tunnel is down, its phones have no internet
-            at all rather than going out directly; other profiles are unaffected.
+            Phones on the phone network (ethernet adapters) reach the internet through the VPN profile
+            chosen for them, and only through it; DNS too. Nothing else uses these tunnels: Batter, adb and
+            the host keep their normal route. When a profile is disabled or its tunnel is down, its phones
+            have no internet at all rather than going out directly; other profiles are unaffected. Give each
+            profile a <code>DNS =</code> line: phones&apos; DNS queries go to that server, through the tunnel.
           </p>
 
           {error && <div className="text-xs text-red-400">{error}</div>}
@@ -191,7 +192,7 @@ export default function AdminVPNPage() {
           )}
 
           {profiles?.length === 0 && !adding && (
-            <div className="text-xs text-gray-500">No profiles yet. Add one to let phones share this server&apos;s internet.</div>
+            <div className="text-xs text-gray-500">No profiles yet. Add one to give phones internet.</div>
           )}
 
           {profiles?.map((p) => {
@@ -302,7 +303,7 @@ export default function AdminVPNPage() {
                   ) : (
                     <span className="flex items-center gap-2">
                       <span className="text-xs text-red-400">
-                        {p.devices > 0 ? `Internet sharing turns off on ${p.devices} phone${p.devices !== 1 ? 's' : ''}.` : 'Delete?'}
+                        {p.devices > 0 ? `${p.devices} phone${p.devices !== 1 ? 's' : ''} will have no internet.` : 'Delete?'}
                       </span>
                       <button
                         onClick={async () => { await run(() => deleteVPNProfile(p.id)); setConfirmDelete(null); }}

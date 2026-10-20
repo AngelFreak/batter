@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { DeviceGrid } from '@/components/device/device-grid';
 import { DeviceWizard } from '@/components/device/device-wizard';
 import { DeviceEditModal } from '@/components/device/device-edit-modal';
+import { ReconnectModal } from '@/components/device/reconnect-modal';
 import { listDevices, startSession, deleteDevice, listGroups, getGroupDevices, DeviceInfo, DeviceGroup } from '@/lib/api';
 import { getToken, getUser } from '@/lib/auth';
 
@@ -17,6 +18,7 @@ export default function DashboardPage() {
   const [error, setError] = useState('');
   const [showWizard, setShowWizard] = useState(false);
   const [editSerial, setEditSerial] = useState<string | null>(null);
+  const [reconnectSerial, setReconnectSerial] = useState<string | null>(null);
 
   // Group filter state
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
@@ -119,6 +121,8 @@ export default function DashboardPage() {
   const totalCount = filteredDevices.length;
   const connectedCount = filteredDevices.filter(d => d.status === 'connected').length;
   const sessionCount = filteredDevices.filter(d => d.has_session).length;
+  const restarted = filteredDevices.filter(d => d.needs_reprovision);
+  const reconnecting = devices.find(d => d.serial === reconnectSerial);
 
   return (
     <>
@@ -178,12 +182,37 @@ export default function DashboardPage() {
           ) : error ? (
             <div className="text-red-400 text-sm">{error}</div>
           ) : (
-            <DeviceGrid
-              devices={filteredDevices}
-              onDeviceClick={handleDeviceClick}
-              onEdit={handleEdit}
-              onDelete={handleDelete}
-            />
+            <>
+              {restarted.length > 0 && (
+                <div className="mb-4 rounded-lg border border-yellow-700 bg-yellow-900/20 p-3">
+                  <div className="text-xs text-yellow-300">
+                    {restarted.length === 1 ? '1 phone' : `${restarted.length} phones`} restarted and can&apos;t be
+                    controlled until {restarted.length === 1 ? 'it is' : 'they are'} plugged into USB once.
+                    {!canAddDevice && ` Ask an operator to reconnect ${restarted.length === 1 ? 'it' : 'them'}.`}
+                  </div>
+                  {canAddDevice && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {restarted.map(d => (
+                        <button
+                          key={d.serial}
+                          onClick={() => setReconnectSerial(d.serial)}
+                          className="px-2.5 py-1.5 rounded bg-brand-600 hover:bg-brand-700 text-white text-xs"
+                        >
+                          Reconnect {d.nickname || d.model || d.serial}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              <DeviceGrid
+                devices={filteredDevices}
+                onDeviceClick={handleDeviceClick}
+                onEdit={handleEdit}
+                onDelete={handleDelete}
+                onReconnect={canAddDevice ? setReconnectSerial : undefined}
+              />
+            </>
           )}
         </div>
 
@@ -194,6 +223,17 @@ export default function DashboardPage() {
             setShowWizard(false);
             fetchDevices();
           }}
+        />
+      )}
+
+      {reconnecting && (
+        <ReconnectModal
+          device={reconnecting}
+          onClose={() => {
+            setReconnectSerial(null);
+            fetchDevices();
+          }}
+          onDone={fetchDevices}
         />
       )}
 

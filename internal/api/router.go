@@ -9,7 +9,6 @@ import (
 	"github.com/XpertaDK/batter/internal/api/middleware"
 	"github.com/XpertaDK/batter/internal/auth"
 	"github.com/XpertaDK/batter/internal/device"
-	"github.com/XpertaDK/batter/internal/tether"
 	"github.com/XpertaDK/batter/internal/vpn"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,9 +23,9 @@ type RouterConfig struct {
 	AllowedOrigins []string
 	// TrustedProxies whose X-Forwarded-For is believed; nil trusts none.
 	TrustedProxies []string
-	// Tether drives per-device reverse tethering; nil if unavailable.
-	Tether *tether.Controller
-	// VPN manages the VPN profiles tethered devices' traffic goes through.
+	// LAN is the phone network's controller; nil when the server has none.
+	LAN handlers.PhoneLAN
+	// VPN manages the VPN profiles phones' traffic goes through.
 	VPN *vpn.Service
 }
 
@@ -55,13 +54,14 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 
 	// Handlers
 	authHandler := handlers.NewAuthHandler(cfg.DB, cfg.JWTManager, cfg.Logger)
-	deviceHandler := handlers.NewDeviceHandler(cfg.DeviceManager, cfg.DB, cfg.Logger)
+	deviceHandler := handlers.NewDeviceHandler(cfg.DeviceManager, cfg.DB, cfg.LAN, cfg.Logger)
 	deviceWSHandler := handlers.NewDeviceWSHandler(cfg.DeviceManager, cfg.Logger, cfg.AllowedOrigins)
 	userHandler := handlers.NewUserHandler(cfg.DB, cfg.Logger)
 	groupHandler := handlers.NewGroupHandler(cfg.DB, cfg.DeviceManager, cfg.Logger)
 	userGroupHandler := handlers.NewUserGroupHandler(cfg.DB, cfg.Logger)
-	tetherHandler := handlers.NewTetherHandler(cfg.DB, cfg.Tether, cfg.VPN, cfg.Logger)
-	vpnHandler := handlers.NewVPNHandler(cfg.VPN, cfg.Tether, cfg.Logger)
+	tetherHandler := handlers.NewTetherHandler(cfg.DB, cfg.LAN, cfg.VPN, cfg.Logger)
+	vpnHandler := handlers.NewVPNHandler(cfg.VPN, cfg.LAN, cfg.Logger)
+	phoneNetHandler := handlers.NewPhoneNetworkHandler(cfg.LAN, cfg.Logger)
 
 	// API v1
 	v1 := r.Group("/api/v1")
@@ -100,6 +100,7 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 					preReg.POST("/probe/:serial", deviceHandler.ProbeDevice)
 					preReg.GET("/lock/:serial", deviceHandler.ScreenLock)
 					preReg.POST("/lock/:serial/remove", deviceHandler.RemoveScreenLock)
+					preReg.POST("/ethernet/:serial", deviceHandler.ProvisionEthernet)
 				}
 
 				// Per-device endpoints. "view" covers watching (which needs a
@@ -180,6 +181,16 @@ func NewRouter(cfg RouterConfig) (*gin.Engine, error) {
 				vpnRoutes.PUT("/:id", vpnHandler.UpdateProfile)
 				vpnRoutes.DELETE("/:id", vpnHandler.DeleteProfile)
 				vpnRoutes.POST("/:id/check", vpnHandler.CheckExitIP)
+			}
+
+			// The phone network: which of the box's network ports it uses
+			// (admin only; it moves a NIC away from the box).
+			phoneNet := protected.Group("/phone-network")
+			phoneNet.Use(middleware.RequireRole("admin"))
+			{
+				phoneNet.GET("", phoneNetHandler.Status)
+				phoneNet.GET("/interfaces", phoneNetHandler.Interfaces)
+				phoneNet.PUT("", phoneNetHandler.SetPort)
 			}
 
 			// User groups / teams (admin only)

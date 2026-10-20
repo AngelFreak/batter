@@ -3,12 +3,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { DeviceThumbnailPlayer } from '@/lib/device-video-thumbnail';
 import { DeviceInfo, fetchScreenshot } from '@/lib/api';
+import { networkState } from '@/lib/device-network';
 
 interface DeviceCardProps {
   device: DeviceInfo;
   onClick: () => void;
   onEdit?: (serial: string) => void;
   onDelete?: (serial: string) => void;
+  onReconnect?: (serial: string) => void;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -18,7 +20,7 @@ const STATUS_COLORS: Record<string, string> = {
   unauthorized: 'bg-red-500',
 };
 
-export function DeviceCard({ device, onClick, onEdit, onDelete }: DeviceCardProps) {
+export function DeviceCard({ device, onClick, onEdit, onDelete, onReconnect }: DeviceCardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const playerRef = useRef<DeviceThumbnailPlayer | null>(null);
   const [status, setStatus] = useState<string>('idle');
@@ -164,7 +166,29 @@ export function DeviceCard({ device, onClick, onEdit, onDelete }: DeviceCardProp
         </div>
         <div className="text-[10px] text-gray-500 mt-0.5 truncate">
           {device.serial}
+          {networkState(device) === 'ethernet' && ' · Ethernet'}
         </div>
+        {device.needs_reprovision && (
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <span
+              className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] bg-yellow-900/30 text-yellow-300 border border-yellow-700 truncate"
+              title="The phone restarted, which turns adb over the network off. It has to be plugged into USB once to switch it back on."
+            >
+              Restarted · needs USB
+            </span>
+            {onReconnect && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onReconnect(device.serial);
+                }}
+                className="px-1.5 py-0.5 rounded text-[10px] bg-brand-600 hover:bg-brand-700 text-white"
+              >
+                Reconnect
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -12,6 +12,16 @@
 // is a start code, then its sequence number (uint32) and send time (unix
 // nanoseconds, int64), so tests can check order and latency.
 //
+// The phone can also be on the LAN: with $FAKEADB_DIR/lan holding an
+// address (ip:port) its adbd listens there, `adb connect <addr>` succeeds
+// and the phone is then also reachable as -s <addr>. $FAKEADB_DIR/unplugged
+// takes it off USB. `shell getprop ro.serialno` answers FAKE01 on either.
+// $FAKEADB_DIR/dead holding that address makes the LAN connection dead, as
+// when the phone's adapter is unplugged: adb still lists it, but commands
+// on it fail, until `adb disconnect` drops it.
+// Every call is logged to $FAKEADB_DIR/calls, so tests can check which
+// transport a command went to.
+//
 // State lives in $FAKEADB_DIR (default /tmp/fakeadb).
 package main
 
@@ -23,6 +33,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,9 +47,14 @@ var dir = cmp.Or(os.Getenv("FAKEADB_DIR"), "/tmp/fakeadb")
 func main() {
 	_ = os.MkdirAll(dir, 0o755)
 	args := os.Args[1:]
+	logCall(args)
 	if len(args) >= 2 && args[0] == "-s" {
-		if args[1] != serial {
+		if !slices.Contains(transports(), args[1]) {
 			fmt.Fprintf(os.Stderr, "adb: device '%s' not found\n", args[1])
+			os.Exit(1)
+		}
+		if args[1] == state("dead") {
+			fmt.Fprintln(os.Stderr, "error: closed")
 			os.Exit(1)
 		}
 		args = args[2:]
@@ -50,12 +66,32 @@ func main() {
 	case "version":
 		fmt.Println("Android Debug Bridge version 1.0.41 (fake)")
 	case "devices":
-		fmt.Printf("List of devices attached\n%s device product:fake model:Fake_Phone device:fake transport_id:1\n", serial)
+		fmt.Println("List of devices attached")
+		for _, t := range transports() {
+			fmt.Printf("%s device product:fake model:Fake_Phone device:fake transport_id:1\n", t)
+		}
+	case "connect":
+		if len(args) == 2 && args[1] == state("lan") {
+			_ = os.WriteFile(filepath.Join(dir, "connected"), []byte(args[1]), 0o644)
+			fmt.Println("connected to " + args[1])
+		} else {
+			fmt.Printf("failed to connect to '%s': Connection refused\n", strings.Join(args[1:], " "))
+			os.Exit(1)
+		}
+	case "disconnect":
+		_ = os.Remove(filepath.Join(dir, "connected"))
+		_ = os.Remove(filepath.Join(dir, "dead"))
+	case "tcpip":
+		_ = os.WriteFile(filepath.Join(dir, "tcpip"), []byte(args[len(args)-1]), 0o644)
+		fmt.Println("restarting in TCP mode port: " + args[len(args)-1])
 	case "get-state":
 		fmt.Println("device")
 	case "reverse":
 		reverse(args[1:])
 	case "shell":
+		if len(args) == 3 && args[1] == "getprop" && args[2] == "ro.serialno" {
+			fmt.Println(serial)
+		}
 		if len(args) > 2 && strings.HasPrefix(args[1], "CLASSPATH=") {
 			if err := scrcpyServer(args); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -64,6 +100,31 @@ func main() {
 		}
 	case "exec-out":
 		os.Exit(1)
+	}
+}
+
+// transports lists the names adb knows the phone by: FAKE01 while on USB,
+// and its LAN address once connected there.
+func transports() []string {
+	var ts []string
+	if _, err := os.Stat(filepath.Join(dir, "unplugged")); err != nil {
+		ts = append(ts, serial)
+	}
+	if c := state("connected"); c != "" && c == state("lan") {
+		ts = append(ts, c)
+	}
+	return ts
+}
+
+func state(name string) string {
+	b, _ := os.ReadFile(filepath.Join(dir, name))
+	return strings.TrimSpace(string(b))
+}
+
+func logCall(args []string) {
+	if f, err := os.OpenFile(filepath.Join(dir, "calls"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintln(f, strings.Join(args, " "))
+		f.Close()
 	}
 }
 

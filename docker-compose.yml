@@ -41,6 +41,15 @@ services:
       postgres:
         condition: service_healthy
     privileged: true
+    # The box's process namespace: Batter reaches the box's network
+    # namespace (/proc/1/ns/net) to list its NICs and move the one an admin
+    # picks for the phone network into the container, and back. See
+    # docs/DEPLOY.md, "Phone network".
+    pid: host
+    sysctls:
+      # Containers inherit the box's forwarding (on with Docker). Batter turns
+      # it on only once the phone network is fenced.
+      net.ipv4.ip_forward: "0"
     # Room for the backend to drain requests (10s) and stop device sessions.
     stop_grace_period: 30s
     volumes:
