@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { DeviceViewer } from '@/components/device/device-viewer';
+import { EthernetPanel } from '@/components/device/ethernet-panel';
 import { getDevice, startSession, stopSession, upgradeSession, downgradeSession, DeviceInfo } from '@/lib/api';
-import { getToken } from '@/lib/auth';
+import { getToken, isOperator } from '@/lib/auth';
+import { networkState } from '@/lib/device-network';
 import { QUALITY_LEVELS, storedQuality, storeQuality, upgradeAtStoredQuality, type VideoQuality } from '@/lib/video-quality';
 
 export default function DeviceDetailPage() {
@@ -16,6 +18,10 @@ export default function DeviceDetailPage() {
   const [error, setError] = useState('');
   const [quality, setQuality] = useState<VideoQuality>('medium');
   const [changingQuality, setChangingQuality] = useState(false);
+  // A restarted phone can't be controlled until it's reconnected over USB;
+  // the steps stay up until it's back, then the session starts.
+  const [reconnecting, setReconnecting] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!getToken()) {
@@ -26,9 +32,15 @@ export default function DeviceDetailPage() {
 
   useEffect(() => {
     const init = async () => {
+      setLoading(true);
+      setError('');
       try {
         const d = await getDevice(serial);
         setDevice(d);
+        if (networkState(d) === 'needs-reprovision') {
+          setReconnecting(true);
+          return;
+        }
 
         // Auto-start and upgrade session for full-quality viewing
         if (!d.has_session) {
@@ -52,7 +64,12 @@ export default function DeviceDetailPage() {
       // Downgrade session when leaving the page
       downgradeSession(serial).catch(() => {});
     };
-  }, [serial]);
+  }, [serial, attempt]);
+
+  const reconnected = useCallback(() => {
+    setReconnecting(false);
+    setAttempt((a) => a + 1);
+  }, []);
 
   useEffect(() => setQuality(storedQuality()), []);
 
@@ -141,7 +158,21 @@ export default function DeviceDetailPage() {
 
         {/* Viewer */}
         <div className="flex-1 overflow-hidden">
-          {loading ? (
+          {reconnecting && device ? (
+            <div className="flex items-center justify-center h-full p-4">
+              <div className="w-full max-w-md rounded-lg bg-gray-900 border border-gray-800 p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-white">This phone restarted</h3>
+                {isOperator() ? (
+                  <EthernetPanel serial={serial} device={device} onDone={reconnected} />
+                ) : (
+                  <p className="text-xs text-gray-300">
+                    A restart turns adb over the network off, so Batter can&apos;t show or control the phone until it
+                    is plugged into USB once. Ask an operator to reconnect it.
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : loading ? (
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">
               Starting session...
             </div>

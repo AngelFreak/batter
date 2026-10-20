@@ -33,3 +33,23 @@ export function networkLabel(d: DeviceNetwork): string {
 export function arrivedOnLAN(d: DeviceNetwork): boolean {
   return networkState(d) === 'ethernet';
 }
+
+// Where a phone is in moving to (or, after a restart, back onto) its
+// ethernet adapter. A restart turns adb over the network off, and only a
+// computer on USB can turn it on again:
+//   plug-usb   not on USB yet (on a restarted phone the adapter is still in)
+//   allow-usb  on USB, waiting for "Allow USB debugging?" to be accepted
+//   switch     on USB: adb over the network can be switched on
+//   done       driven over the network
+export type ReconnectStep = 'plug-usb' | 'allow-usb' | 'switch' | 'done';
+
+export function reconnectStep(d: DeviceNetwork): ReconnectStep {
+  switch (networkState(d)) {
+    case 'ethernet':
+      return 'done';
+    case 'usb':
+      return 'switch';
+    default:
+      return d.status === 'unauthorized' ? 'allow-usb' : 'plug-usb';
+  }
+}

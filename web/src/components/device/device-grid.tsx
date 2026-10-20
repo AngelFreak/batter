@@ -8,9 +8,10 @@ interface DeviceGridProps {
   onDeviceClick: (serial: string) => void;
   onEdit?: (serial: string) => void;
   onDelete?: (serial: string) => void;
+  onReconnect?: (serial: string) => void;
 }
 
-export function DeviceGrid({ devices, onDeviceClick, onEdit, onDelete }: DeviceGridProps) {
+export function DeviceGrid({ devices, onDeviceClick, onEdit, onDelete, onReconnect }: DeviceGridProps) {
   if (devices.length === 0) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -33,6 +34,7 @@ export function DeviceGrid({ devices, onDeviceClick, onEdit, onDelete }: DeviceG
           onClick={() => onDeviceClick(device.serial)}
           onEdit={onEdit}
           onDelete={onDelete}
+          onReconnect={onReconnect}
         />
       ))}
     </div>

@@ -10,6 +10,7 @@ interface DeviceCardProps {
   onClick: () => void;
   onEdit?: (serial: string) => void;
   onDelete?: (serial: string) => void;
+  onReconnect?: (serial: string) => void;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -19,7 +20,7 @@ const STATUS_COLORS: Record<string, string> = {
   unauthorized: 'bg-red-500',
 };
 
-export function DeviceCard({ device, onClick, onEdit, onDelete }: DeviceCardProps) {
+export function DeviceCard({ device, onClick, onEdit, onDelete, onReconnect }: DeviceCardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const playerRef = useRef<DeviceThumbnailPlayer | null>(null);
   const [status, setStatus] = useState<string>('idle');
@@ -168,8 +169,24 @@ export function DeviceCard({ device, onClick, onEdit, onDelete }: DeviceCardProp
           {networkState(device) === 'ethernet' && ' · Ethernet'}
         </div>
         {device.needs_reprovision && (
-          <div className="text-[10px] text-yellow-400 mt-0.5 truncate" title="The phone restarted, which turns adb over the network off. Plug it into USB and switch it back in Edit device.">
-            Needs USB re-provision
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <span
+              className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] bg-yellow-900/30 text-yellow-300 border border-yellow-700 truncate"
+              title="The phone restarted, which turns adb over the network off. It has to be plugged into USB once to switch it back on."
+            >
+              Restarted · needs USB
+            </span>
+            {onReconnect && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onReconnect(device.serial);
+                }}
+                className="px-1.5 py-0.5 rounded text-[10px] bg-brand-600 hover:bg-brand-700 text-white"
+              >
+                Reconnect
+              </button>
+            )}
           </div>
         )}
       </div>
