@@ -5,37 +5,23 @@ import { DeviceCard } from './device-card';
 
 interface DeviceGridProps {
   devices: DeviceInfo[];
-  onDeviceClick: (serial: string) => void;
   onEdit?: (serial: string) => void;
   onDelete?: (serial: string) => void;
   onReconnect?: (serial: string) => void;
 }
 
-export function DeviceGrid({ devices, onDeviceClick, onEdit, onDelete, onReconnect }: DeviceGridProps) {
-  if (devices.length === 0) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="text-center">
-          <div className="text-gray-500 text-sm">No devices registered</div>
-          <div className="text-gray-600 text-xs mt-1">
-            Click &apos;Add Device&apos; to register your first phone.
-          </div>
-        </div>
-      </div>
-    );
-  }
+/**
+ * Square cells with hairline borders: the grid draws the top and left edge,
+ * each card the right and bottom, so a part-filled last row has no stray cells.
+ * The page shows its own empty states, so an empty list renders nothing.
+ */
+export function DeviceGrid({ devices, onEdit, onDelete, onReconnect }: DeviceGridProps) {
+  if (devices.length === 0) return null;
 
   return (
-    <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-4">
+    <div className="grid grid-cols-2 border-l border-t border-vx-hairline md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
       {devices.map((device) => (
-        <DeviceCard
-          key={device.serial}
-          device={device}
-          onClick={() => onDeviceClick(device.serial)}
-          onEdit={onEdit}
-          onDelete={onDelete}
-          onReconnect={onReconnect}
-        />
+        <DeviceCard key={device.serial} device={device} onEdit={onEdit} onDelete={onDelete} onReconnect={onReconnect} />
       ))}
     </div>
   );

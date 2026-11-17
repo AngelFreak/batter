@@ -1,30 +1,26 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { MoreVertical, Pencil, ShieldCheck, Trash2 } from 'lucide-react';
 import { DeviceThumbnailPlayer } from '@/lib/device-video-thumbnail';
 import { DeviceInfo, fetchScreenshot } from '@/lib/api';
-import { networkState } from '@/lib/device-network';
+import { networkLabel, networkState } from '@/lib/device-network';
+import { deviceStatus, streamStatus } from '@/lib/device-status';
+import { displayName } from '@/lib/dashboard-filter';
+import { Button, Menu, StatusChip, StatusGlyph, cx } from '@/components/ui';
 
 interface DeviceCardProps {
   device: DeviceInfo;
-  onClick: () => void;
   onEdit?: (serial: string) => void;
   onDelete?: (serial: string) => void;
   onReconnect?: (serial: string) => void;
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  connected: 'bg-green-500',
-  disconnected: 'bg-gray-500',
-  offline: 'bg-yellow-500',
-  unauthorized: 'bg-red-500',
-};
-
-export function DeviceCard({ device, onClick, onEdit, onDelete, onReconnect }: DeviceCardProps) {
+export function DeviceCard({ device, onEdit, onDelete, onReconnect }: DeviceCardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const playerRef = useRef<DeviceThumbnailPlayer | null>(null);
-  const [status, setStatus] = useState<string>('idle');
-  const [showMenu, setShowMenu] = useState(false);
+  const [streamCode, setStreamCode] = useState<string>('idle');
   const [screenshotUrl, setScreenshotUrl] = useState<string | null>(null);
 
   // Always fetch cached screenshot — used as fallback behind live canvas too
@@ -33,13 +29,19 @@ export function DeviceCard({ device, onClick, onEdit, onDelete, onReconnect }: D
     fetchScreenshot(device.serial).then((blob) => {
       if (cancelled) return;
       if (blob) {
-        setScreenshotUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(blob); });
+        setScreenshotUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return URL.createObjectURL(blob);
+        });
       }
     });
 
     return () => {
       cancelled = true;
-      setScreenshotUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
+      setScreenshotUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
     };
   }, [device.serial]);
 
@@ -49,7 +51,7 @@ export function DeviceCard({ device, onClick, onEdit, onDelete, onReconnect }: D
     const player = new DeviceThumbnailPlayer(canvasRef.current);
     playerRef.current = player;
 
-    player.setOnStatusChange(setStatus);
+    player.setOnStatusChange(setStreamCode);
     player.connect(device.serial);
 
     return () => {
@@ -58,138 +60,126 @@ export function DeviceCard({ device, onClick, onEdit, onDelete, onReconnect }: D
     };
   }, [device.serial, device.has_session]);
 
-  const statusColor = STATUS_COLORS[device.status] || 'bg-gray-500';
+  const status = deviceStatus(device);
   const isDisconnected = device.status !== 'connected';
-  const label = device.nickname || device.model || device.serial;
+  const name = displayName(device);
+  const href = `/devices/${encodeURIComponent(device.serial)}`;
+  const net = networkState(device);
+  // The status chip already says "offline" and "needs USB"; the network label
+  // adds something only when the phone is attached.
+  const showNetwork = net === 'usb' || net === 'ethernet';
+
+  // Only a failing stream is worth words on the thumbnail.
+  const stream = device.has_session ? streamStatus(streamCode) : null;
+  const streamError = stream && stream.tone === 'danger' ? stream : null;
+
+  const dim = isDisconnected ? 'opacity-40 grayscale' : '';
+
+  const items = [
+    ...(onEdit ? [{ label: 'Edit', icon: <Pencil />, onSelect: () => onEdit(device.serial) }] : []),
+    ...(onDelete ? [{ label: 'Delete', icon: <Trash2 />, danger: true, onSelect: () => onDelete(device.serial) }] : []),
+  ];
 
   return (
-    <div
-      onClick={onClick}
-      className="group cursor-pointer rounded-lg bg-gray-900 border border-gray-800 overflow-hidden hover:border-brand-500/50 transition-colors relative"
-    >
-      {/* Kebab menu */}
-      {(onEdit || onDelete) && (
-        <div
-          className="absolute top-1.5 right-1.5 z-10 opacity-0 group-hover:opacity-100 transition-opacity"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            onClick={() => setShowMenu(!showMenu)}
-            className="w-6 h-6 flex items-center justify-center rounded bg-gray-800/80 hover:bg-gray-700 text-gray-400 hover:text-gray-200 text-xs"
+    <article className="relative flex min-w-0 flex-col border-b border-r border-vx-hairline bg-vx-surface transition-colors hover:bg-vx-elevated">
+      {/* Thumbnail area */}
+      <div className="relative aspect-[9/15.5] overflow-hidden bg-vx-recessed">
+        {/* Cached screenshot, the base layer when there is one */}
+        {screenshotUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={screenshotUrl}
+            className={cx('absolute inset-0 h-full w-full object-contain', dim)}
+            alt=""
+          />
+        ) : (
+          !device.has_session && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <span className="vx-label">No preview</span>
+            </div>
+          )
+        )}
+
+        {/* Live canvas, over the cached screenshot while streaming */}
+        {device.has_session && (
+          <canvas ref={canvasRef} className={cx('absolute inset-0 h-full w-full object-contain', dim)} />
+        )}
+
+        {streamError && (
+          <div
+            role="status"
+            className={cx(
+              'absolute inset-x-2 bottom-2 flex items-center gap-1.5 border border-vx-danger/50 bg-vx-recessed/90 px-2 py-1.5',
+              'font-mono text-[11px] uppercase leading-tight tracking-wide text-vx-danger',
+            )}
           >
-            &#8942;
-          </button>
-          {showMenu && (
-            <div className="absolute right-0 mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[100px]">
-              {onEdit && (
-                <button
-                  onClick={() => {
-                    setShowMenu(false);
-                    onEdit(device.serial);
-                  }}
-                  className="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700"
-                >
-                  Edit
-                </button>
-              )}
-              {onDelete && (
-                <button
-                  onClick={() => {
-                    setShowMenu(false);
-                    if (confirm(`Delete device ${device.serial}?`)) {
-                      onDelete(device.serial);
-                    }
-                  }}
-                  className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-gray-700"
-                >
-                  Delete
-                </button>
-              )}
+            <StatusGlyph icon={streamError.icon} />
+            <span className="min-w-0">{streamError.label}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Info */}
+      <div className="flex min-w-0 flex-col gap-1.5 px-3 pb-3 pt-2.5">
+        <div className="flex items-center justify-between gap-1">
+          <Link
+            href={href}
+            className={cx(
+              'min-w-0 flex-1 truncate text-[15px] font-bold leading-snug text-vx-fg',
+              // The link's ::after covers the whole card, so the card is the target.
+              'after:absolute after:inset-0 focus-visible:outline-none',
+              'focus-visible:after:outline focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-vx-accent',
+            )}
+          >
+            {name}
+            <span className="sr-only">, {status.label}</span>
+          </Link>
+          {items.length > 0 && (
+            <div className="relative z-10 -mr-1.5 shrink-0">
+              <Menu
+                trigger={(p) => (
+                  <Button
+                    {...p}
+                    variant="quiet"
+                    size="sm"
+                    iconOnly
+                    aria-label={`Actions for ${name}`}
+                    icon={<MoreVertical size={16} />}
+                  />
+                )}
+                items={items}
+              />
             </div>
           )}
         </div>
-      )}
 
-      {/* Thumbnail area */}
-      <div className="relative aspect-[9/16] bg-gray-950 flex items-center justify-center overflow-hidden">
-        {/* Cached screenshot — always shown as base layer when available */}
-        {screenshotUrl ? (
-          <img
-            src={screenshotUrl}
-            className={`absolute inset-0 w-full h-full object-contain ${isDisconnected ? 'brightness-50' : ''}`}
-            alt=""
-          />
-        ) : !device.has_session && (
-          <div className="text-gray-600 text-xs">
-            {isDisconnected ? 'Disconnected' : 'No session'}
-          </div>
-        )}
-
-        {/* Live canvas — overlays cached screenshot when streaming */}
-        {device.has_session && (
-          <canvas
-            ref={canvasRef}
-            className={`absolute inset-0 w-full h-full object-contain ${isDisconnected ? 'brightness-50' : ''}`}
-          />
-        )}
-
-        {/* Darken overlay for disconnected devices without screenshot */}
-        {isDisconnected && !screenshotUrl && !device.has_session && (
-          <div className="absolute inset-0 bg-gray-950/40" />
-        )}
-
-        {/* Connection status badge */}
-        <div className={`absolute top-2 left-2 z-10 flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-medium ${
-          isDisconnected
-            ? 'bg-gray-900/80 text-gray-400'
-            : 'bg-gray-900/80 text-green-400'
-        }`}>
-          <div className={`w-1.5 h-1.5 rounded-full ${isDisconnected ? 'bg-gray-500' : 'bg-green-500'}`} />
-          {isDisconnected ? 'Disconnected' : 'Connected'}
-        </div>
-
-        {/* Status overlay */}
-        {device.has_session && status !== 'streaming' && status !== 'idle' && (
-          <div className="absolute inset-0 bg-gray-950/80 flex items-center justify-center">
-            <span className="text-gray-400 text-xs">{status}</span>
-          </div>
-        )}
-      </div>
-
-      {/* Info bar */}
-      <div className="px-3 py-2 border-t border-gray-800">
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
-          <span className="text-xs font-medium text-gray-200 truncate">
-            {label}
-          </span>
-        </div>
-        <div className="text-[10px] text-gray-500 mt-0.5 truncate">
+        <div className="truncate font-mono text-[12px] leading-tight text-vx-fg-label" title={device.serial}>
           {device.serial}
-          {networkState(device) === 'ethernet' && ' · Ethernet'}
         </div>
-        {device.needs_reprovision && (
-          <div className="mt-1.5 flex items-center gap-1.5">
-            <span
-              className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] bg-yellow-900/30 text-yellow-300 border border-yellow-700 truncate"
-              title="The phone restarted, which turns adb over the network off. It has to be plugged into USB once to switch it back on."
-            >
-              Restarted · needs USB
-            </span>
-            {onReconnect && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onReconnect(device.serial);
-                }}
-                className="px-1.5 py-0.5 rounded text-[10px] bg-brand-600 hover:bg-brand-700 text-white"
-              >
-                Reconnect
-              </button>
+
+        <StatusChip status={status} withHint={false} />
+
+        {(showNetwork || device.vpn_profile_name) && (
+          <div className="flex min-w-0 flex-col gap-0.5 text-[13px] leading-snug text-vx-fg-muted">
+            {showNetwork && <span className="truncate">{networkLabel(device)}</span>}
+            {device.vpn_profile_name && (
+              <span className="flex min-w-0 items-center gap-1.5" title={`VPN: ${device.vpn_profile_name}`}>
+                <ShieldCheck size={13} aria-hidden className="shrink-0" />
+                <span className="sr-only">VPN: </span>
+                <span className="truncate">{device.vpn_profile_name}</span>
+              </span>
             )}
           </div>
         )}
+
+        {device.needs_reprovision && onReconnect && (
+          <div className="relative z-10 mt-1">
+            <Button size="sm" onClick={() => onReconnect(device.serial)}>
+              Reconnect
+            </Button>
+          </div>
+        )}
       </div>
-    </div>
+    </article>
   );
 }
