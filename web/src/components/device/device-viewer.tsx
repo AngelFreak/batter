@@ -8,6 +8,7 @@ import { DeviceAudioPlayer } from '@/lib/device-audio';
 import { AudioControls, type AudioView } from '@/lib/audio-controls';
 import { fetchScreenshot, pushFile, installAPK } from '@/lib/api';
 import { errorMessage } from '@/lib/api-error';
+import { audioReasonText } from '@/lib/server-text';
 import { useNoSwipeNavigation } from '@/lib/use-no-swipe-navigation';
 import { Button, StatusChip, useToast, type MenuItem } from '@/components/ui';
 import { NavBar } from './nav-bar';
@@ -290,7 +291,7 @@ export function DeviceViewer({ serial, onStreamLost, onLiveChange }: DeviceViewe
   const audioUsable = audio.state === 'available' || audio.state === 'blocked';
   const audioTitle =
     audio.state === 'unavailable'
-      ? `Audio unavailable${audio.reason ? `: ${audio.reason}` : ''}`
+      ? audioReasonText(audio.reason)
       : audio.state === 'unsupported'
         ? 'This browser cannot play device audio'
         : audio.state === 'needs-https'

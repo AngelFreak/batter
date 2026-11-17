@@ -10,6 +10,7 @@ import {
 } from '@/lib/api';
 import { errorMessage } from '@/lib/api-error';
 import { describeNIC, pickable, stateSummary } from '@/lib/phone-network';
+import { nicRefusalText, portWarningText } from '@/lib/server-text';
 import { Banner, Button, ConfirmDialog, EmptyState, PageHeader, StatusGlyph, cx, useToast } from '@/components/ui';
 import { DataTable } from '@/components/admin/data-table';
 import { PageBody } from '@/components/admin/page-body';
@@ -148,7 +149,7 @@ export default function PhoneNetworkPage() {
             {status.unavailable && (
               <Banner tone="danger">Batter can&rsquo;t see the box&rsquo;s network ports. The reason is in the server log.</Banner>
             )}
-            {status.warning && <Banner tone="warn">{status.warning}</Banner>}
+            {status.warning && <Banner tone="warn">{portWarningText(status.warning)}</Banner>}
           </section>
         )}
 
@@ -195,7 +196,7 @@ export default function PhoneNetworkPage() {
                   {refused.map((n) => (
                     <li key={n.mac} className="text-[13px] text-vx-fg-muted">
                       <span className="font-mono text-vx-fg">{n.name}</span>{' '}
-                      <span className="font-mono text-xs text-vx-fg-label">({n.mac})</span>: {n.reason}
+                      <span className="font-mono text-xs text-vx-fg-label">({n.mac})</span>: {nicRefusalText(n.reason)}
                     </li>
                   ))}
                 </ul>
