@@ -4,8 +4,31 @@
 // the server never meant for the browser can't reach the page.
 
 const IFACE = '[A-Za-z0-9_.:@-]{1,15}';
-const ADDR = '[0-9A-Fa-f.:]+/\\d{1,3}';
-const DST = '[0-9A-Fa-f.:/]+';
+const MAC = '[0-9a-f]{2}(?::[0-9a-f]{2}){5}';
+
+function isIPv4(s: string): boolean {
+  const parts = s.split('.');
+  return parts.length === 4 && parts.every((p) => /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/.test(p));
+}
+
+function isIPv6(s: string): boolean {
+  const halves = s.split('::');
+  if (halves.length > 2) return false;
+  const groups = (h: string) => (h === '' ? [] : h.split(':'));
+  const all = halves.flatMap(groups);
+  if (!all.every((g) => /^[0-9A-Fa-f]{1,4}$/.test(g))) return false;
+  return halves.length === 2 ? all.length <= 7 : all.length === 8;
+}
+
+// An address, optionally with a prefix length that fits its family.
+export function isIPPrefix(s: string, needPrefix: boolean): boolean {
+  const [ip, prefix, ...rest] = s.split('/');
+  if (rest.length > 0 || (needPrefix && prefix === undefined)) return false;
+  const v4 = isIPv4(ip);
+  if (!v4 && !isIPv6(ip)) return false;
+  if (prefix === undefined) return true;
+  return /^\d{1,3}$/.test(prefix) && Number(prefix) <= (v4 ? 32 : 128);
+}
 
 // Go literals in internal/device/scrcpy*.go, mapped to UI sentences.
 export const AUDIO_REASONS: ReadonlyMap<string, string> = new Map([
@@ -38,6 +61,13 @@ export function portWarningText(warning: string): string {
   return 'Something on the box manages the phone network port. The details are in the server log.';
 }
 
+// Template from internal/lan/port.go (StateMissing).
+export function missingPortText(error?: string): string {
+  const m = error && new RegExp(`^network port (${IFACE}) \\((${MAC})\\) isn't on the box; plug it in$`).exec(error);
+  if (m) return `Network port ${m[1]} (${m[2]}) isn’t on the box. Plug it in.`;
+  return 'The chosen network port isn’t on the box. Plug it in.';
+}
+
 // Templates from internal/lan/hostnet.go (refusal).
 export function nicRefusalText(reason?: string): string {
   if (!reason) return 'It can’t be used.';
@@ -46,9 +76,11 @@ export function nicRefusalText(reason?: string): string {
   if (reason === "it carries the box's own network connection (default route)") {
     return 'It carries the box’s own network connection (default route).';
   }
-  m = new RegExp(`^it has addresses on the box \\((${ADDR}(?:, ${ADDR})*)\\); remove them, and whatever configures them, first$`).exec(reason);
-  if (m) return `It has addresses on the box (${m[1]}). Remove them, and whatever configures them, first.`;
-  m = new RegExp(`^the box has routes through it \\((${DST}|default)\\)$`).exec(reason);
-  if (m) return `The box has routes through it (${m[1]}).`;
+  m = /^it has addresses on the box \((.+)\); remove them, and whatever configures them, first$/.exec(reason);
+  if (m && m[1].split(', ').every((a) => isIPPrefix(a, true))) {
+    return `It has addresses on the box (${m[1]}). Remove them, and whatever configures them, first.`;
+  }
+  m = /^the box has routes through it \((.+)\)$/.exec(reason);
+  if (m && (m[1] === 'default' || isIPPrefix(m[1], false))) return `The box has routes through it (${m[1]}).`;
   return 'The box uses it. The details are in the server log.';
 }

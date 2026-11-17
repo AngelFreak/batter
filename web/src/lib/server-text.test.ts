@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { AUDIO_REASONS, audioReasonText, nicRefusalText, portWarningText } from './server-text';
+import { AUDIO_REASONS, audioReasonText, isIPPrefix, missingPortText, nicRefusalText, portWarningText } from './server-text';
 
 // npm test runs from web/.
 const ROOT = resolve(process.cwd(), '..', 'internal');
@@ -23,6 +23,7 @@ test('the warning and refusal templates still match the Go source', () => {
   const port = read('lan', 'port.go');
   assert.ok(port.includes('"%s was up on the box before Batter took it: something on the box manages it "'));
   assert.ok(port.includes('"the box brought %s up after Batter gave it back: something on the box manages it, "'));
+  assert.ok(port.includes(`"network port %s (%s) isn't on the box; plug it in"`));
   const host = read('lan', 'hostnet.go');
   assert.ok(host.includes(`"it's part of %s on the box"`));
   assert.ok(host.includes(`"it carries the box's own network connection (default route)"`));
@@ -70,4 +71,33 @@ test('port refusals keep validated names and addresses only', () => {
   assert.equal(nicRefusalText('the box has routes through it (10.0.0.0/8)'), 'The box has routes through it (10.0.0.0/8).');
   assert.equal(nicRefusalText('the box has routes through it (evil text)'), 'The box uses it. The details are in the server log.');
   assert.equal(nicRefusalText('exec: "ip": executable file not found'), 'The box uses it. The details are in the server log.');
+});
+
+test('a missing port keeps its validated name and MAC only', () => {
+  assert.equal(
+    missingPortText("network port enx001122 (aa:bb:cc:00:00:01) isn't on the box; plug it in"),
+    'Network port enx001122 (aa:bb:cc:00:00:01) isn’t on the box. Plug it in.',
+  );
+  const fixed = 'The chosen network port isn’t on the box. Plug it in.';
+  assert.equal(missingPortText("network port <b>x</b> (aa:bb:cc:00:00:01) isn't on the box; plug it in"), fixed);
+  assert.equal(missingPortText("network port eth1 (not-a-mac) isn't on the box; plug it in"), fixed);
+  assert.equal(missingPortText(undefined), fixed);
+});
+
+test('addresses and routes must be real IPs with prefixes that fit', () => {
+  for (const ok of ['192.168.1.5/24', '0.0.0.0/0', 'fd00::5/64', '::1/128', 'fe80::1:2:3:4/10', '1:2:3:4:5:6:7:8/128']) {
+    assert.ok(isIPPrefix(ok, true), ok);
+  }
+  assert.ok(isIPPrefix('10.0.0.5', false));
+  for (const bad of ['999.999.999.999/999', '10.0.0.1/33', '::::/', 'fd00::5/129', '1.2.3/8', '1:2:3:4:5:6:7:8:9/64',
+    'a::b::c/64', '1:2:3::4:5::6:7:8/64', '10.0.0.1/24/1', '01.2.3.4/8', 'fd00::5']) {
+    assert.ok(!isIPPrefix(bad, true), bad);
+  }
+  assert.equal(
+    nicRefusalText('it has addresses on the box (999.999.999.999/999); remove them, and whatever configures them, first'),
+    'The box uses it. The details are in the server log.',
+  );
+  assert.equal(nicRefusalText('the box has routes through it (::::/)'), 'The box uses it. The details are in the server log.');
+  assert.equal(nicRefusalText('the box has routes through it (default)'), 'The box has routes through it (default).');
+  assert.equal(nicRefusalText('the box has routes through it (10.0.0.5)'), 'The box has routes through it (10.0.0.5).');
 });

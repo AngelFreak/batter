@@ -10,7 +10,7 @@ import {
 } from '@/lib/api';
 import { errorMessage } from '@/lib/api-error';
 import { describeNIC, pickable, stateSummary } from '@/lib/phone-network';
-import { nicRefusalText, portWarningText } from '@/lib/server-text';
+import { missingPortText, nicRefusalText, portWarningText } from '@/lib/server-text';
 import { Banner, Button, ConfirmDialog, EmptyState, PageHeader, StatusGlyph, cx, useToast } from '@/components/ui';
 import { DataTable } from '@/components/admin/data-table';
 import { PageBody } from '@/components/admin/page-body';
@@ -138,11 +138,11 @@ export default function PhoneNetworkPage() {
               )}
             </div>
             {/* error and unavailable can be raw system errors, which the server logs.
-                Only "missing" is a fixed sentence written for display. */}
+                Only "missing" has a known template, rebuilt from its port name and MAC. */}
             {status.error && (
               <Banner tone="danger">
                 {status.state === 'missing'
-                  ? status.error
+                  ? missingPortText(status.error)
                   : 'The phone network port couldn\u2019t be set up. The reason is in the server log.'}
               </Banner>
             )}
