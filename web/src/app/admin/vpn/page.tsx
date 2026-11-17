@@ -1,12 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import { Globe, Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import { getToken, isAdmin } from '@/lib/auth';
 import {
   listVPNProfiles, createVPNProfile, updateVPNProfile, deleteVPNProfile, checkVPNProfileExitIP,
   type VPNProfile,
 } from '@/lib/api';
+import { errorMessage } from '@/lib/api-error';
+import { Banner, Button, ConfirmDialog, Dialog, EmptyState, Field, FormError, PageHeader, StatusGlyph, cx, useToast } from '@/components/ui';
+import { PageBody } from '@/components/admin/page-body';
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -23,101 +27,167 @@ function formatHandshake(iso?: string): string {
   return new Date(iso).toLocaleString();
 }
 
-const inputClass =
-  'w-full px-3 py-2 bg-gray-950 border border-gray-800 rounded-lg text-xs text-white placeholder-gray-600 focus:outline-none focus:border-brand-600';
+function phones(n: number): string {
+  return `${n} ${n === 1 ? 'phone' : 'phones'}`;
+}
 
 const configPlaceholder =
   '[Interface]\nPrivateKey = ...\nAddress = 10.64.0.2/32\nDNS = 10.64.0.1\n\n[Peer]\nPublicKey = ...\nEndpoint = vpn.example.net:51820\nAllowedIPs = 0.0.0.0/0';
 
+type ExitResult = { state: 'checking' } | { state: 'ok'; ip: string } | { state: 'blocked' } | { state: 'failed' };
+
 function Switch({ on, disabled, label, onChange }: { on: boolean; disabled: boolean; label: string; onChange: () => void }) {
   return (
     <button
+      type="button"
       role="switch"
       aria-checked={on}
       aria-label={label}
       onClick={onChange}
       disabled={disabled}
-      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:opacity-50 ${
-        on ? 'bg-brand-600' : 'bg-gray-700'
-      }`}
+      className="inline-flex min-h-touch items-center gap-3 rounded-sm font-mono text-[11px] uppercase tracking-wide text-vx-fg-muted disabled:opacity-50"
     >
       <span
-        className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${on ? 'translate-x-4' : 'translate-x-0.5'}`}
-      />
+        className={cx(
+          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-sm border transition-colors',
+          on ? 'border-vx-accent bg-vx-accent/20' : 'border-vx-control bg-vx-canvas',
+        )}
+      >
+        <span
+          className={cx(
+            'inline-block h-3 w-3 rounded-sm transition-transform',
+            on ? 'translate-x-[19px] bg-vx-accent' : 'translate-x-[3px] bg-vx-fg-muted',
+          )}
+        />
+      </span>
+      {on ? 'On' : 'Off'}
     </button>
   );
 }
 
-// ProfileForm creates a profile, or edits one (blank config keeps the saved one).
-function ProfileForm({
-  profile, busy, onSubmit, onCancel,
-}: {
-  profile?: VPNProfile;
-  busy: boolean;
-  onSubmit: (name: string, config: string) => void;
-  onCancel: () => void;
-}) {
-  const [name, setName] = useState(profile?.name ?? '');
-  const [config, setConfig] = useState('');
-  const canSave = name.trim() !== '' && (profile !== undefined || config.trim() !== '');
+function Fact({ label, children, wide }: { label: string; children: React.ReactNode; wide?: boolean }) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
-      <input
-        type="text"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="Name, e.g. Sweden"
-        className={inputClass}
-        autoFocus
-      />
-      <textarea
-        value={config}
-        onChange={(e) => setConfig(e.target.value)}
-        rows={10}
-        spellCheck={false}
-        placeholder={profile ? 'Paste a new WireGuard config to replace the saved one (optional)' : configPlaceholder}
-        className={`${inputClass} font-mono`}
-      />
-      <p className="text-[10px] text-gray-500">
-        A standard wg-quick .conf from your VPN provider. The private key is stored in Batter&apos;s
-        database and is never shown again.
-      </p>
-      <div className="flex gap-2">
-        <button
-          onClick={() => onSubmit(name, config)}
-          disabled={busy || !canSave}
-          className="px-3 py-2 text-xs bg-brand-600 hover:bg-brand-700 text-white rounded-lg disabled:opacity-50"
-        >
-          {busy ? 'Saving...' : profile ? 'Save' : 'Add profile'}
-        </button>
-        <button onClick={onCancel} className="px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg">
-          Cancel
-        </button>
-      </div>
+    <div className={cx('bg-vx-surface px-4 py-3', wide && 'sm:col-span-2')}>
+      <dt className="vx-label">{label}</dt>
+      <dd className="mt-1 break-words text-sm text-vx-fg">{children}</dd>
     </div>
+  );
+}
+
+// ProfileDialog creates a profile, or edits one (a blank config keeps the saved one).
+function ProfileDialog({
+  open,
+  profile,
+  onClose,
+  onSubmit,
+}: {
+  open: boolean;
+  profile: VPNProfile | null;
+  onClose: () => void;
+  onSubmit: (name: string, config: string) => Promise<void>;
+}) {
+  const formId = useId();
+  const nameRef = useRef<HTMLInputElement>(null);
+  const [name, setName] = useState('');
+  const [config, setConfig] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setName(profile?.name ?? '');
+    setConfig('');
+    setError('');
+    nameRef.current?.focus();
+  }, [open, profile]);
+
+  const canSave = name.trim() !== '' && (profile !== null || config.trim() !== '');
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy || !canSave) return;
+    setBusy(true);
+    setError('');
+    try {
+      await onSubmit(name, config);
+      setConfig('');
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err, profile ? 'save the profile' : 'add the profile'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      busy={busy}
+      size="lg"
+      title={profile ? `Edit ${profile.name}` : 'New VPN profile'}
+      footer={
+        <>
+          <Button variant="quiet" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button type="submit" form={formId} variant="primary" disabled={busy || !canSave}>
+            {busy ? 'Saving…' : profile ? 'Save' : 'Add profile'}
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-4">
+        <Field label="Name" hint="Shown when you choose a profile for a phone, for example Sweden.">
+          <input ref={nameRef} className="vx-input" type="text" value={name} onChange={(e) => setName(e.target.value)} required />
+        </Field>
+        <Field
+          label={profile ? 'WireGuard config (optional)' : 'WireGuard config'}
+          hint={
+            profile
+              ? 'Leave blank to keep the saved config. Paste a new one to replace it. The private key is stored in Batter’s database and is never shown again.'
+              : 'A standard wg-quick .conf from your VPN provider. Add a DNS = line: the phones’ DNS queries go to that server, through the tunnel. The private key is stored in Batter’s database and is never shown again.'
+          }
+        >
+          <textarea
+            className="vx-input font-mono text-[13px]"
+            value={config}
+            onChange={(e) => setConfig(e.target.value)}
+            rows={10}
+            spellCheck={false}
+            autoComplete="off"
+            autoCapitalize="none"
+            placeholder={profile ? 'Paste a new WireGuard config to replace the saved one' : configPlaceholder}
+          />
+        </Field>
+        <FormError>{error}</FormError>
+      </form>
+    </Dialog>
   );
 }
 
 export default function AdminVPNPage() {
   const router = useRouter();
+  const toast = useToast();
   const [profiles, setProfiles] = useState<VPNProfile[] | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [exits, setExits] = useState<Record<string, { exit_ip?: string; error?: string }>>({});
+  const [connLost, setConnLost] = useState(false);
+  const [dialog, setDialog] = useState<{ profile: VPNProfile | null } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<VPNProfile | null>(null);
+  const [toggling, setToggling] = useState<string | null>(null);
+  const [exits, setExits] = useState<Record<string, ExitResult>>({});
 
   useEffect(() => {
     if (!getToken()) { router.replace('/login'); return; }
     if (!isAdmin()) { router.replace('/dashboard'); return; }
   }, [router]);
 
+  // A poll: when it fails the last list stays on screen under a banner.
   const refresh = useCallback(async () => {
     try {
       setProfiles(await listVPNProfiles());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load VPN profiles');
+      setConnLost(false);
+    } catch {
+      setConnLost(true);
     }
   }, []);
 
@@ -127,202 +197,261 @@ export default function AdminVPNPage() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  const run = async (fn: () => Promise<unknown>) => {
-    setBusy(true);
-    setError('');
+  const toggleEnabled = async (p: VPNProfile) => {
+    setToggling(p.id);
     try {
-      await fn();
+      await updateVPNProfile(p.id, { enabled: !p.enabled });
+      toast.success(
+        p.enabled
+          ? p.devices > 0
+            ? `Turned off ${p.name}. Its ${phones(p.devices)} have no internet.`
+            : `Turned off ${p.name}.`
+          : `Turned on ${p.name}.`,
+      );
       await refresh();
-      return true;
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Request failed');
-      return false;
+      toast.error(errorMessage(e, p.enabled ? 'turn the profile off' : 'turn the profile on'));
     } finally {
-      setBusy(false);
+      setToggling(null);
     }
   };
 
-  const handleCheck = async (id: string) => {
-    setExits((x) => ({ ...x, [id]: {} }));
+  // The server answers 200 with an error field when the check can't get out;
+  // that text can carry network detail, so it is not shown.
+  const check = async (p: VPNProfile) => {
+    setExits((x) => ({ ...x, [p.id]: { state: 'checking' } }));
     try {
-      const res = await checkVPNProfileExitIP(id);
-      setExits((x) => ({ ...x, [id]: res }));
+      const res = await checkVPNProfileExitIP(p.id);
+      if (res.exit_ip) {
+        setExits((x) => ({ ...x, [p.id]: { state: 'ok', ip: res.exit_ip as string } }));
+        toast.success(`${p.name} exits from ${res.exit_ip}.`);
+      } else {
+        setExits((x) => ({ ...x, [p.id]: { state: 'blocked' } }));
+        toast.error(`${p.name}: no internet for its phones. The tunnel may be down.`);
+      }
     } catch (e) {
-      setExits((x) => ({ ...x, [id]: { error: e instanceof Error ? e.message : 'Check failed' } }));
+      setExits((x) => ({ ...x, [p.id]: { state: 'failed' } }));
+      toast.error(errorMessage(e, 'check the exit IP'));
     }
   };
 
   return (
     <>
-      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
-        <div>
-          <h2 className="text-lg font-semibold text-white">VPN profiles</h2>
-          <p className="text-xs text-gray-500">
-            {profiles ? `${profiles.length} profile${profiles.length !== 1 ? 's' : ''}` : 'Loading...'}
-          </p>
-        </div>
-        <button
-          onClick={() => { setAdding(true); setEditing(null); }}
-          className="px-3 py-2 text-xs bg-brand-600 hover:bg-brand-700 text-white rounded-lg"
-        >
-          New Profile
-        </button>
-      </div>
+      <PageHeader
+        eyebrow="Admin"
+        title="VPN profiles"
+        sub={
+          <span>
+            The tunnels phones use to reach the internet.
+            {profiles && ` ${profiles.length} ${profiles.length === 1 ? 'profile' : 'profiles'}.`}
+          </span>
+        }
+        actions={
+          <Button variant="primary" icon={<Plus size={16} />} onClick={() => setDialog({ profile: null })}>
+            New profile
+          </Button>
+        }
+      />
 
-      <div className="flex-1 overflow-auto">
-        <div className="max-w-4xl mx-auto p-6 space-y-4">
-          <p className="text-xs text-gray-400">
-            Phones on the phone network (ethernet adapters) reach the internet through the VPN profile
-            chosen for them, and only through it; DNS too. Nothing else uses these tunnels: Batter, adb and
-            the host keep their normal route. When a profile is disabled or its tunnel is down, its phones
-            have no internet at all rather than going out directly; other profiles are unaffected. Give each
-            profile a <code>DNS =</code> line: phones&apos; DNS queries go to that server, through the tunnel.
-          </p>
+      <PageBody>
+        <p className="max-w-3xl text-[13.5px] text-vx-fg-muted">
+          Phones on the phone network reach the internet only through the profile chosen for them, DNS included. Nothing
+          else uses these tunnels: Batter, adb and the host keep their normal route. If a profile is off or its tunnel is
+          down, its phones have no internet at all rather than going out directly. Other profiles are unaffected.
+        </p>
 
-          {error && <div className="text-xs text-red-400">{error}</div>}
+        {connLost && (
+          <Banner tone="danger" actions={<Button size="sm" onClick={refresh}>Retry now</Button>}>
+            Connection lost, retrying.
+          </Banner>
+        )}
 
-          {adding && (
-            <ProfileForm
-              busy={busy}
-              onCancel={() => setAdding(false)}
-              onSubmit={async (name, config) => {
-                if (await run(() => createVPNProfile(name, config))) setAdding(false);
-              }}
-            />
-          )}
+        {profiles === null && !connLost && (
+          <div role="status" className="border border-vx-hairline bg-vx-surface px-4 py-10 text-center text-sm text-vx-fg-muted">
+            Loading profiles…
+          </div>
+        )}
 
-          {profiles?.length === 0 && !adding && (
-            <div className="text-xs text-gray-500">No profiles yet. Add one to give phones internet.</div>
-          )}
-
-          {profiles?.map((p) => {
-            const exit = exits[p.id];
-            if (editing === p.id) {
-              return (
-                <ProfileForm
-                  key={p.id}
-                  profile={p}
-                  busy={busy}
-                  onCancel={() => setEditing(null)}
-                  onSubmit={async (name, config) => {
-                    const changes = config.trim() ? { name, config } : { name };
-                    if (await run(() => updateVPNProfile(p.id, changes))) setEditing(null);
-                  }}
-                />
-              );
+        {profiles?.length === 0 && (
+          <EmptyState
+            icon={<ShieldCheck />}
+            title="No VPN profiles yet"
+            action={
+              <Button variant="primary" icon={<Plus size={16} />} onClick={() => setDialog({ profile: null })}>
+                New profile
+              </Button>
             }
-            return (
-              <div key={p.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-semibold text-white">{p.name}</div>
-                    <div className="text-[10px] text-gray-500">
-                      {p.devices} phone{p.devices !== 1 ? 's' : ''} ·{' '}
-                      <span className={!p.enabled ? 'text-gray-400' : p.status?.up ? 'text-green-400' : 'text-yellow-400'}>
-                        {!p.enabled ? 'Disabled (its phones have no internet)' : p.status?.up ? 'Tunnel up' : 'Tunnel down'}
-                      </span>
-                    </div>
-                  </div>
-                  <Switch
-                    on={p.enabled}
-                    disabled={busy}
-                    label={`${p.name} enabled`}
-                    onChange={() => run(() => updateVPNProfile(p.id, { enabled: !p.enabled }))}
-                  />
-                </div>
+          >
+            Add a WireGuard profile to give phones internet. Without one, phones on the phone network have none.
+          </EmptyState>
+        )}
 
-                {p.apply_error && (
-                  <div className="text-xs text-yellow-400 bg-yellow-900/20 border border-yellow-800/50 rounded-lg p-3">
-                    Saved, but not fully applied: {p.apply_error}
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <div className="text-[10px] text-gray-500 mb-1">Address</div>
-                    <div className="text-gray-300 font-mono">{p.config.addresses.join(', ')}</div>
-                  </div>
-                  <div>
-                    <div className="text-[10px] text-gray-500 mb-1">DNS for phones</div>
-                    <div className="text-gray-300 font-mono">{p.config.dns?.join(', ') || 'default (8.8.8.8)'}</div>
-                  </div>
-                  <div className="col-span-2">
-                    <div className="text-[10px] text-gray-500 mb-1">This server&apos;s public key</div>
-                    <div className="text-gray-300 font-mono break-all">{p.config.public_key}</div>
-                  </div>
-                </div>
-
-                {p.config.peers.map((peer) => {
-                  const live = p.status?.peers.find((s) => s.public_key === peer.public_key);
-                  return (
-                    <div key={peer.public_key} className="border-t border-gray-800 pt-3 grid grid-cols-2 gap-3 text-xs">
-                      <div>
-                        <div className="text-[10px] text-gray-500 mb-1">Endpoint</div>
-                        <div className="text-gray-300 font-mono">{live?.endpoint || peer.endpoint}</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-gray-500 mb-1">Latest handshake</div>
-                        <div className="text-gray-300">{p.enabled ? formatHandshake(live?.latest_handshake) : '-'}</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-gray-500 mb-1">Received / sent</div>
-                        <div className="text-gray-300">
-                          {live ? `${formatBytes(live.rx_bytes)} / ${formatBytes(live.tx_bytes)}` : '-'}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-gray-500 mb-1">Allowed IPs</div>
-                        <div className="text-gray-300 font-mono">{peer.allowed_ips.join(', ')}</div>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                <div className="border-t border-gray-800 pt-3 flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={() => handleCheck(p.id)}
-                    className="px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg"
-                  >
-                    Check exit IP
-                  </button>
-                  {exit && !exit.exit_ip && !exit.error && <span className="text-xs text-gray-500">Checking...</span>}
-                  {exit?.exit_ip && (
-                    <span className="text-xs text-gray-300">
-                      Exits from <span className="font-mono text-white">{exit.exit_ip}</span>
+        {profiles?.map((p) => {
+          const exit = exits[p.id];
+          const tunnel = !p.enabled
+            ? { label: 'Off', icon: 'ring' as const, cls: 'text-vx-fg-label' }
+            : p.status?.up
+              ? { label: 'Tunnel up', icon: 'dot' as const, cls: 'text-vx-accent' }
+              : { label: 'Tunnel down', icon: 'triangle' as const, cls: 'text-vx-warn' };
+          return (
+            <section
+              key={p.id}
+              aria-labelledby={`vpn-${p.id}`}
+              className="border border-vx-hairline bg-vx-surface"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-vx-hairline px-4 py-3">
+                <div className="min-w-0">
+                  <h2 id={`vpn-${p.id}`} className="truncate text-lg">
+                    {p.name}
+                  </h2>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-wide">
+                    <span className={cx('inline-flex items-center gap-1.5', tunnel.cls)}>
+                      <StatusGlyph icon={tunnel.icon} className={tunnel.icon === 'dot' ? 'vx-pulse' : undefined} />
+                      {tunnel.label}
                     </span>
-                  )}
-                  {exit?.error && <span className="text-xs text-red-400">No internet for its phones: {exit.error}</span>}
-                  <span className="flex-1" />
-                  <button onClick={() => { setEditing(p.id); setAdding(false); }} className="text-xs text-brand-400 hover:text-brand-300">
-                    Edit
-                  </button>
-                  {confirmDelete !== p.id ? (
-                    <button onClick={() => setConfirmDelete(p.id)} className="text-xs text-red-400 hover:text-red-300">
-                      Delete
-                    </button>
-                  ) : (
-                    <span className="flex items-center gap-2">
-                      <span className="text-xs text-red-400">
-                        {p.devices > 0 ? `${p.devices} phone${p.devices !== 1 ? 's' : ''} will have no internet.` : 'Delete?'}
-                      </span>
-                      <button
-                        onClick={async () => { await run(() => deleteVPNProfile(p.id)); setConfirmDelete(null); }}
-                        disabled={busy}
-                        className="px-3 py-2 text-xs bg-red-600 hover:bg-red-700 text-white rounded-lg disabled:opacity-50"
-                      >
-                        Delete
-                      </button>
-                      <button onClick={() => setConfirmDelete(null)} className="text-xs text-gray-400 hover:text-gray-200">
-                        Cancel
-                      </button>
-                    </span>
-                  )}
+                    <span className="text-vx-fg-label">{phones(p.devices)}</span>
+                    {!p.enabled && <span className="text-vx-fg-label normal-case">Its phones have no internet</span>}
+                  </div>
                 </div>
+                <Switch
+                  on={p.enabled}
+                  disabled={toggling === p.id}
+                  label={`${p.name} enabled`}
+                  onChange={() => toggleEnabled(p)}
+                />
               </div>
-            );
-          })}
-        </div>
-      </div>
+
+              {p.apply_error && (
+                <div className="border-b border-vx-hairline px-4 py-3">
+                  {/* apply_error is a raw command error; the server logs it. */}
+                  <Banner tone="warn">
+                    Saved, but not applied: the kill switch or tunnel didn&rsquo;t come up, so its phones have no internet. The reason is in the server log.
+                  </Banner>
+                </div>
+              )}
+
+              <dl className="grid gap-px border-b border-vx-hairline bg-vx-hairline sm:grid-cols-2">
+                <Fact label="Address">
+                  <span className="font-mono text-[13px]">{p.config.addresses.join(', ')}</span>
+                </Fact>
+                <Fact label="DNS for phones">
+                  <span className="font-mono text-[13px]">{p.config.dns?.join(', ') || 'default (8.8.8.8)'}</span>
+                </Fact>
+                <Fact label="This server’s public key" wide>
+                  <span className="break-all font-mono text-[13px]">{p.config.public_key}</span>
+                </Fact>
+                {p.config.peers.flatMap((peer) => {
+                  const live = p.status?.peers.find((s) => s.public_key === peer.public_key);
+                  return [
+                    <Fact key={`${peer.public_key}-ep`} label="Endpoint">
+                      <span className="font-mono text-[13px]">{live?.endpoint || peer.endpoint}</span>
+                    </Fact>,
+                    <Fact key={`${peer.public_key}-hs`} label="Latest handshake">
+                      {p.enabled ? formatHandshake(live?.latest_handshake) : '-'}
+                    </Fact>,
+                    <Fact key={`${peer.public_key}-tr`} label="Received / sent">
+                      <span className="font-mono text-[13px]">
+                        {live ? `${formatBytes(live.rx_bytes)} / ${formatBytes(live.tx_bytes)}` : '-'}
+                      </span>
+                    </Fact>,
+                    <Fact key={`${peer.public_key}-ip`} label="Allowed IPs">
+                      <span className="font-mono text-[13px]">{peer.allowed_ips.join(', ')}</span>
+                    </Fact>,
+                  ];
+                })}
+              </dl>
+
+              <div className="flex flex-wrap items-center gap-2 px-4 py-3">
+                <Button
+                  icon={<Globe size={14} />}
+                  className="max-sm:h-touch"
+                  disabled={exit?.state === 'checking'}
+                  onClick={() => check(p)}
+                >
+                  {exit?.state === 'checking' ? 'Checking…' : 'Check exit IP'}
+                </Button>
+                <p role="status" className="min-w-0 text-[13px] text-vx-fg-muted">
+                  {exit?.state === 'ok' && (
+                    <>
+                      Exits from <span className="font-mono text-vx-fg">{exit.ip}</span>
+                    </>
+                  )}
+                  {exit?.state === 'blocked' && (
+                    <span className="text-vx-warn">No internet for its phones. The tunnel may be down.</span>
+                  )}
+                  {exit?.state === 'failed' && <span className="text-vx-danger">The check didn’t run.</span>}
+                </p>
+                <span className="flex-1" />
+                <Button
+                  icon={<Pencil size={14} />}
+                  className="max-sm:h-touch"
+                  aria-label={`Edit ${p.name}`}
+                  onClick={() => setDialog({ profile: p })}
+                >
+                  Edit
+                </Button>
+                <Button
+                  variant="danger"
+                  icon={<Trash2 size={14} />}
+                  className="max-sm:h-touch"
+                  aria-label={`Delete ${p.name}`}
+                  onClick={() => setDeleteTarget(p)}
+                >
+                  Delete
+                </Button>
+              </div>
+            </section>
+          );
+        })}
+      </PageBody>
+
+      <ProfileDialog
+        open={!!dialog}
+        profile={dialog?.profile ?? null}
+        onClose={() => setDialog(null)}
+        onSubmit={async (name, config) => {
+          const editing = dialog?.profile;
+          if (editing) {
+            const changes = config.trim() ? { name, config } : { name };
+            await updateVPNProfile(editing.id, changes);
+            toast.success(`Saved ${name}.`);
+          } else {
+            await createVPNProfile(name, config);
+            toast.success(`Added ${name}.`);
+          }
+          await refresh();
+        }}
+      />
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        title={deleteTarget ? `Delete ${deleteTarget.name}?` : ''}
+        confirmLabel="Delete"
+        consequence={
+          deleteTarget &&
+          (deleteTarget.devices > 0 ? (
+            <>
+              {phones(deleteTarget.devices)} use this profile and will lose internet: the kill switch blocks their
+              traffic until you choose another profile for them. This can&apos;t be undone.
+            </>
+          ) : (
+            <>No phones use this profile. This can&apos;t be undone.</>
+          ))
+        }
+        formatError={(e) => errorMessage(e, 'delete the profile')}
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          const res = await deleteVPNProfile(deleteTarget.id);
+          const off = res.devices_turned_off?.length ?? 0;
+          toast.success(
+            off > 0
+              ? `Deleted ${deleteTarget.name}. ${phones(off)} now have no internet.`
+              : `Deleted ${deleteTarget.name}.`,
+          );
+          await refresh();
+        }}
+      />
     </>
   );
 }

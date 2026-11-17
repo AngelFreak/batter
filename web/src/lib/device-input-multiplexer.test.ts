@@ -60,3 +60,21 @@ test('a late close from a removed socket does not drop its replacement', () => {
   h.sendText('hi');
   assert.equal(fresh.sent.length, 1, 'replacement connection was dropped by stale close');
 });
+
+test('a phone whose control socket is refused with 403 shows as denied', async () => {
+  const calls: string[] = [];
+  (globalThis as Record<string, unknown>).fetch = (url: string) => {
+    calls.push(url);
+    return Promise.resolve({ status: url.includes('/device/B/') ? 403 : 404 });
+  };
+  const h = new MultiplexerInputHandler();
+  const status = new Map<string, string>();
+  h.setOnStatusChange((serial, s) => status.set(serial, s));
+  h.setDevices(['A', 'B']);
+  socketFor('A').drop();
+  socketFor('B').drop();
+  await new Promise<void>((r) => setImmediate(r));
+  assert.equal(status.get('B'), 'denied');
+  assert.equal(status.get('A'), 'disconnected');
+  assert.equal(calls.length, 2);
+});

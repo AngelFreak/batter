@@ -1,8 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Check, LoaderCircle } from 'lucide-react';
 import { discoverDevices, getDevice, provisionEthernet, DeviceInfo } from '@/lib/api';
+import { errorMessage } from '@/lib/api-error';
+import { displayName } from '@/lib/dashboard-filter';
 import { DeviceNetwork, networkState, reconnectStep } from '@/lib/device-network';
+import { useUser } from '@/lib/use-user';
+import { Button, ConfirmDialog, cx, useToast } from '@/components/ui';
 
 type StepState = 'done' | 'active' | 'waiting' | 'pending';
 
@@ -16,27 +21,34 @@ async function fetchPhone(serial: string): Promise<DeviceNetwork | null> {
   }
 }
 
-function Step({ n, state, title, children }: { n: number; state: StepState; title: string; children?: React.ReactNode }) {
+function Step({ n, state, title, children }: { n: number; state: StepState; title: string; children?: ReactNode }) {
   const marker =
     state === 'done' ? (
-      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-[10px] text-white">✓</span>
+      <span className="flex h-5 w-5 items-center justify-center rounded-sm bg-vx-accent text-vx-accent-ink">
+        <Check size={14} strokeWidth={3} aria-hidden />
+        <span className="sr-only">Done</span>
+      </span>
     ) : state === 'waiting' ? (
-      <span className="block h-5 w-5 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" />
+      <span className="flex h-5 w-5 items-center justify-center text-vx-accent">
+        <LoaderCircle size={16} className="animate-spin" aria-hidden />
+        <span className="sr-only">Waiting</span>
+      </span>
     ) : (
       <span
-        className={`flex h-5 w-5 items-center justify-center rounded-full border text-[10px] ${
-          state === 'active' ? 'border-brand-500 text-brand-400' : 'border-gray-700 text-gray-600'
-        }`}
+        className={cx(
+          'flex h-5 w-5 items-center justify-center rounded-sm border font-mono text-[11px]',
+          state === 'active' ? 'border-vx-accent text-vx-accent' : 'border-vx-control text-vx-fg-label',
+        )}
       >
         {n}
       </span>
     );
   return (
-    <li className="flex gap-2.5">
-      <div className="flex-shrink-0 pt-px">{marker}</div>
+    <li className="flex gap-3">
+      <div className="shrink-0 pt-px">{marker}</div>
       <div className="min-w-0 flex-1">
-        <div className={`text-xs ${state === 'pending' ? 'text-gray-500' : 'text-gray-200'}`}>{title}</div>
-        {children && <div className="mt-1 space-y-1.5">{children}</div>}
+        <div className={cx('text-sm', state === 'pending' ? 'text-vx-fg-label' : 'text-vx-fg')}>{title}</div>
+        {children && <div className="mt-1.5 space-y-2">{children}</div>}
       </div>
     </li>
   );
@@ -58,13 +70,17 @@ export function EthernetPanel({
   device?: DeviceInfo | null;
   onDone?: () => void;
 }) {
+  const toast = useToast();
+  const { isOperator, ready } = useUser();
   const [phone, setPhone] = useState<DeviceNetwork | null>(device ?? null);
   const [restarted] = useState(device ? networkState(device) === 'needs-reprovision' : false);
   const [switched, setSwitched] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [confirming, setConfirming] = useState(false);
   const step = phone ? reconnectStep(phone) : 'plug-usb';
   const done = step === 'done';
+  const name = device ? displayName(device) : serial;
+  // The API rejects this for viewers, so don't offer it.
+  const canSwitch = ready && isOperator;
 
   useEffect(() => {
     if (done) return;
@@ -93,24 +109,21 @@ export function EthernetPanel({
     }
   }, [done, onDone]);
 
+  // Throws on failure, so the confirmation stays open and shows why.
   const switchToEthernet = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      await provisionEthernet(serial);
-      setSwitched(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to switch the phone to the network');
-    } finally {
-      setBusy(false);
-    }
+    await provisionEthernet(serial);
+    setSwitched(true);
+    toast.success('adb over the network is on. Unplug USB and plug in the ethernet adapter.');
   };
 
   if (done) {
     return (
-      <p className="text-xs text-green-400">
-        On the phone network{phone?.lan_address ? ` (${phone.lan_address})` : ''}. Batter controls it over ethernet,
-        and it reaches the internet only through its VPN profile.
+      <p className="flex items-start gap-2 text-sm text-vx-fg">
+        <Check size={16} className="mt-0.5 shrink-0 text-vx-accent" aria-hidden />
+        <span>
+          On the phone network{phone?.lan_address ? ` (${phone.lan_address})` : ''}. Batter controls it over ethernet,
+          and it reaches the internet only through its VPN profile.
+        </span>
       </p>
     );
   }
@@ -121,8 +134,8 @@ export function EthernetPanel({
   const adapterState: StepState = switched ? 'waiting' : 'pending';
 
   return (
-    <div className="space-y-3">
-      <p className="text-xs text-gray-300">
+    <div className="space-y-4">
+      <p className="text-sm text-vx-fg-muted">
         {restarted ? (
           <>
             The phone restarted, which turns adb over the network off, so Batter can&apos;t control it. Android only
@@ -135,46 +148,57 @@ export function EthernetPanel({
           </>
         )}
       </p>
-      <ol className="space-y-3">
+      <ol className="space-y-4">
         <Step n={1} state={usbState} title="Plug the phone into Batter's USB">
           {usbState === 'waiting' && (
-            <p className="text-[10px] text-gray-500">
+            <p className="text-[13px] text-vx-fg-muted">
               {restarted ? 'Take the ethernet adapter out first: the phone has one port. ' : ''}
-              Waiting for the phone on USB...
+              Waiting for the phone on USB…
             </p>
           )}
           {step === 'allow-usb' && (
-            <p className="text-[10px] text-yellow-400">
+            <p className="text-[13px] text-vx-warn">
               On the phone, tap <b>Allow</b> on &quot;Allow USB debugging?&quot; and tick &quot;Always allow from this
               computer&quot;.
             </p>
           )}
         </Step>
         <Step n={2} state={switchState} title="Switch on adb over the network">
-          {switchState === 'active' && (
-            <button
-              onClick={switchToEthernet}
-              disabled={busy}
-              className="px-2.5 py-1.5 rounded bg-brand-600 hover:bg-brand-700 text-white text-xs disabled:opacity-50"
-            >
-              {busy ? 'Switching...' : 'Switch to ethernet'}
-            </button>
-          )}
-          {error && <p className="text-[10px] text-red-400">{error}</p>}
+          {switchState === 'active' &&
+            (canSwitch ? (
+              <Button variant="primary" onClick={() => setConfirming(true)}>
+                Switch to ethernet
+              </Button>
+            ) : (
+              <p className="text-[13px] text-vx-fg-muted">
+                {ready ? 'Only operators can switch a phone to ethernet. Ask one to do this step.' : ''}
+              </p>
+            ))}
         </Step>
         <Step n={3} state={adapterState} title="Unplug USB and plug the ethernet adapter (with its charger) back in">
           {switched && (
             <>
-              <p className="text-[10px] text-gray-500">Waiting for the phone on the phone network...</p>
-              {onUSB && (
-                <button onClick={switchToEthernet} disabled={busy} className="text-[10px] text-gray-500 hover:text-gray-300">
+              <p className="text-[13px] text-vx-fg-muted">Waiting for the phone on the phone network…</p>
+              {onUSB && canSwitch && (
+                <Button variant="quiet" size="sm" onClick={() => setConfirming(true)}>
                   Still on USB after a while? Switch again
-                </button>
+                </Button>
               )}
             </>
           )}
         </Step>
       </ol>
+
+      <ConfirmDialog
+        open={confirming}
+        onClose={() => setConfirming(false)}
+        title={`Switch ${name} to ethernet?`}
+        consequence="Batter removes the old USB tether app (gnirehtet) from the phone and switches its adb to the network. Then unplug USB and plug in the ethernet adapter: the phone moves to the phone network and reaches the internet only through its VPN profile."
+        confirmLabel="Switch"
+        tone="primary"
+        formatError={(err) => errorMessage(err, 'switch the phone to the network')}
+        onConfirm={switchToEthernet}
+      />
     </div>
   );
 }

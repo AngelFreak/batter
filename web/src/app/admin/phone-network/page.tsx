@@ -2,27 +2,34 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { Cable } from 'lucide-react';
 import { getToken, isAdmin } from '@/lib/auth';
 import {
   getPhoneNetwork, listBoxNICs, setPhoneNetworkPort,
   type BoxNIC, type PhoneNetworkStatus,
 } from '@/lib/api';
+import { errorMessage } from '@/lib/api-error';
 import { describeNIC, pickable, stateSummary } from '@/lib/phone-network';
+import { missingPortText, nicRefusalText, portWarningText } from '@/lib/server-text';
+import { Banner, Button, ConfirmDialog, EmptyState, PageHeader, StatusGlyph, cx, useToast } from '@/components/ui';
+import { DataTable } from '@/components/admin/data-table';
+import { PageBody } from '@/components/admin/page-body';
 
-const toneClass = {
-  ok: 'bg-green-900/30 text-green-300 border-green-700',
-  off: 'bg-gray-800 text-gray-300 border-gray-700',
-  bad: 'bg-yellow-900/30 text-yellow-300 border-yellow-700',
+const TONE = {
+  ok: { icon: 'dot' as const, cls: 'text-vx-accent' },
+  off: { icon: 'ring' as const, cls: 'text-vx-fg-muted' },
+  bad: { icon: 'triangle' as const, cls: 'text-vx-warn' },
 };
 
 export default function PhoneNetworkPage() {
   const router = useRouter();
+  const toast = useToast();
   const [status, setStatus] = useState<PhoneNetworkStatus | null>(null);
   const [nics, setNics] = useState<BoxNIC[] | null>(null);
   const [nicError, setNicError] = useState('');
+  const [statusError, setStatusError] = useState(false);
   const [choice, setChoice] = useState<string>('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [confirming, setConfirming] = useState(false);
   // First-run: shown right after the admin account is created.
   const [setup, setSetup] = useState(false);
 
@@ -32,20 +39,22 @@ export default function PhoneNetworkPage() {
     setSetup(new URLSearchParams(window.location.search).has('setup'));
   }, [router]);
 
+  // A poll: when it fails the last state stays on screen under a banner.
   const load = useCallback(async () => {
     try {
       const st = await getPhoneNetwork();
       setStatus(st);
+      setStatusError(false);
       setChoice((c) => c || st.port?.mac || '');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load');
+    } catch {
+      setStatusError(true);
     }
     try {
       setNics(await listBoxNICs());
       setNicError('');
     } catch (e) {
-      setNics([]);
-      setNicError(e instanceof Error ? e.message : 'Failed to list network ports');
+      setNics((n) => n ?? []);
+      setNicError(errorMessage(e, 'list the network ports'));
     }
   }, []);
 
@@ -55,150 +64,247 @@ export default function PhoneNetworkPage() {
     return () => clearInterval(t);
   }, [load]);
 
-  const apply = async (mac: string | null) => {
-    setBusy(true);
-    setError('');
-    try {
-      setStatus(await setPhoneNetworkPort(mac));
-      setChoice(mac ?? '');
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to change the phone network');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const summary = status ? stateSummary(status) : null;
   const usable = pickable(nics ?? []);
   const refused = (nics ?? []).filter((n) => !n.usable);
+  const current = status?.port?.mac ?? '';
+  const unchanged = choice === current;
+  const chosenNic = nics?.find((n) => n.mac === choice);
+  const portName = choice ? chosenNic?.name ?? status?.port?.name ?? choice : '';
 
   return (
     <>
-      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
-        <div>
-          <h2 className="text-lg font-semibold text-white">Phone network</h2>
-          <p className="text-xs text-gray-500">The box&apos;s network port for the phones&apos; switch</p>
-        </div>
+      <PageHeader
+        eyebrow="Admin"
+        title="Phone network"
+        sub="The box’s network port for the phones’ switch."
+        actions={
+          setup && (
+            <Button
+              variant={status?.state === 'active' ? 'primary' : 'secondary'}
+              onClick={() => router.push('/dashboard')}
+            >
+              {status?.state === 'active' ? 'Continue' : 'Skip for now'}
+            </Button>
+          )
+        }
+      />
+
+      <PageBody>
         {setup && (
-          <button
-            onClick={() => router.push('/dashboard')}
-            className="px-2.5 py-1.5 rounded border border-gray-700 text-gray-300 text-xs hover:bg-gray-800"
-          >
-            {status?.state === 'active' ? 'Continue' : 'Skip for now'}
-          </button>
+          <Banner tone="info">
+            Optional: if the phones will use ethernet adapters, choose the network port their switch is plugged into. You
+            can do this later under Admin, Phone network.
+          </Banner>
         )}
-      </div>
 
-      <div className="flex-1 overflow-auto">
-        <div className="max-w-3xl mx-auto p-6 space-y-4">
-          {setup && (
-            <p className="text-xs text-gray-300">
-              Optional: if the phones will use ethernet adapters, choose the network port their switch is plugged
-              into. You can do this later under Admin → Phone network.
-            </p>
-          )}
-          <p className="text-xs text-gray-400">
-            Phones with an ethernet adapter, on a switch plugged into this port, get their network from Batter and
-            reach the internet only through their VPN profile. While Batter uses the port, the box itself has no
-            connection on it. Phones on USB are controlled only and get no internet.
-          </p>
+        <p className="max-w-3xl text-[13.5px] text-vx-fg-muted">
+          Phones with an ethernet adapter, on a switch plugged into this port, get their network from Batter and reach the
+          internet only through their VPN profile. While Batter uses the port, the box itself has no connection on it.
+          Phones on USB are controlled only and get no internet.
+        </p>
 
-          {status && summary && (
-            <div className="rounded-lg bg-gray-900 border border-gray-800 p-3 space-y-2">
-              <div className="flex items-center gap-2">
-                <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] border ${toneClass[summary.tone]}`}>
-                  {summary.label}
-                </span>
-                {status.state === 'active' && (
-                  <span className="text-[10px] text-gray-500">
-                    Batter {status.address} · phones {status.pool}
-                  </span>
-                )}
-              </div>
-              {status.error && <p className="text-xs text-red-400">{status.error}</p>}
-              {status.unavailable && <p className="text-xs text-red-400">{status.unavailable}</p>}
-              {status.warning && <p className="text-xs text-yellow-400">{status.warning}</p>}
-            </div>
-          )}
+        {statusError && (
+          <Banner tone="danger" actions={<Button size="sm" onClick={load}>Retry now</Button>}>
+            Connection lost, retrying.
+          </Banner>
+        )}
 
-          <div className="rounded-lg bg-gray-900 border border-gray-800 p-3 space-y-2">
-            <div className="text-sm text-white">Port</div>
-            {nicError && <p className="text-xs text-red-400">{nicError}</p>}
-            <label className="flex items-center gap-2 text-xs text-gray-300">
-              <input type="radio" name="port" checked={choice === ''} onChange={() => setChoice('')} disabled={busy} />
-              Off (no phone network)
-            </label>
-            {usable.map((n) => (
-              <label key={n.mac} className="flex items-center gap-2 text-xs text-gray-300">
-                <input type="radio" name="port" checked={choice === n.mac} onChange={() => setChoice(n.mac)} disabled={busy} />
-                <span className="font-mono">{n.name}</span>
-                <span className="text-[10px] text-gray-500">{n.mac} · {describeNIC(n)}</span>
-              </label>
-            ))}
-            {refused.length > 0 && (
-              <div className="pt-2 space-y-1">
-                <div className="text-[10px] text-gray-500">Can&apos;t be used:</div>
-                {refused.map((n) => (
-                  <div key={n.mac} className="text-[10px] text-gray-500">
-                    <span className="font-mono text-gray-400">{n.name}</span> ({n.mac}): {n.reason}
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                onClick={() => apply(choice || null)}
-                disabled={busy || choice === (status?.port?.mac ?? '')}
-                className="px-2.5 py-1.5 rounded bg-brand-600 text-white text-xs hover:bg-brand-700 disabled:opacity-50"
-              >
-                {busy ? 'Applying...' : 'Apply'}
-              </button>
-              {error && <span className="text-xs text-red-400">{error}</span>}
-            </div>
-            <p className="text-[10px] text-gray-500">
-              The box must not manage this port itself (no NetworkManager, netplan or ifupdown configuration): see
-              docs/DEPLOY.md. Applying takes effect at once.
-            </p>
+        {status === null && !statusError && (
+          <div role="status" className="border border-vx-hairline bg-vx-surface px-4 py-10 text-center text-sm text-vx-fg-muted">
+            Loading the phone network…
           </div>
+        )}
 
-          {status && status.state === 'active' && (
-            <div className="rounded-lg bg-gray-900 border border-gray-800 p-3 space-y-2">
-              <div className="text-sm text-white">Devices on the network</div>
-              {status.clients.length === 0 ? (
-                <p className="text-xs text-gray-500">None yet.</p>
-              ) : (
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-[10px] text-gray-500 text-left">
-                      <th className="font-normal pb-1">Address</th>
-                      <th className="font-normal pb-1">MAC</th>
-                      <th className="font-normal pb-1">Name</th>
-                      <th className="font-normal pb-1">Phone</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {status.clients.map((c) => (
-                      <tr key={c.mac} className="text-gray-300">
-                        <td className="font-mono py-0.5">{c.ip}</td>
-                        <td className="font-mono py-0.5">{c.mac}</td>
-                        <td className="py-0.5">{c.hostname || '—'}</td>
-                        <td className="py-0.5">
-                          {c.serial ? (
-                            <span className="font-mono">{c.serial}</span>
-                          ) : (
-                            <span className="text-gray-500">not a phone (no internet)</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+        {status && summary && (
+          <section aria-labelledby="pn-status" className="space-y-3 border border-vx-hairline bg-vx-surface p-4">
+            <h2 id="pn-status" className="vx-label">
+              Status
+            </h2>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span
+                className={cx(
+                  'inline-flex items-center gap-2 font-mono text-xs uppercase tracking-wide',
+                  TONE[summary.tone].cls,
+                )}
+              >
+                <StatusGlyph icon={TONE[summary.tone].icon} className={status.state === 'active' ? 'vx-pulse' : undefined} />
+                {summary.label}
+              </span>
+              {status.state === 'active' && (
+                <span className="font-mono text-xs text-vx-fg-label">
+                  Batter {status.address} · phones {status.pool}
+                </span>
               )}
             </div>
-          )}
-        </div>
-      </div>
+            {/* error and unavailable can be raw system errors, which the server logs.
+                Only "missing" has a known template, rebuilt from its port name and MAC. */}
+            {status.error && (
+              <Banner tone="danger">
+                {status.state === 'missing'
+                  ? missingPortText(status.error)
+                  : 'The phone network port couldn\u2019t be set up. The reason is in the server log.'}
+              </Banner>
+            )}
+            {status.unavailable && (
+              <Banner tone="danger">Batter can&rsquo;t see the box&rsquo;s network ports. The reason is in the server log.</Banner>
+            )}
+            {status.warning && <Banner tone="warn">{portWarningText(status.warning)}</Banner>}
+          </section>
+        )}
+
+        {nics !== null && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!unchanged) setConfirming(true);
+            }}
+            className="space-y-4 border border-vx-hairline bg-vx-surface p-4"
+          >
+            <fieldset className="space-y-2">
+              <legend className="vx-label mb-2">Port</legend>
+              {nicError && (
+                <p role="alert" className="border-l-2 border-vx-danger bg-vx-danger/10 px-3 py-2 text-sm text-vx-fg">
+                  {nicError}
+                </p>
+              )}
+              <PortOption
+                checked={choice === ''}
+                onSelect={() => setChoice('')}
+                title="Off"
+                detail="No phone network. Phones get no internet."
+              />
+              {usable.map((n) => (
+                <PortOption
+                  key={n.mac}
+                  checked={choice === n.mac}
+                  onSelect={() => setChoice(n.mac)}
+                  title={n.name}
+                  mono
+                  detail={`${n.mac} · ${describeNIC(n)}`}
+                />
+              ))}
+              {usable.length === 0 && !nicError && (
+                <p className="text-sm text-vx-fg-muted">No network port on the box can be used.</p>
+              )}
+            </fieldset>
+
+            {refused.length > 0 && (
+              <div className="space-y-1 border-t border-vx-hairline pt-3">
+                <h3 className="vx-label">Can’t be used</h3>
+                <ul className="space-y-1">
+                  {refused.map((n) => (
+                    <li key={n.mac} className="text-[13px] text-vx-fg-muted">
+                      <span className="font-mono text-vx-fg">{n.name}</span>{' '}
+                      <span className="font-mono text-xs text-vx-fg-label">({n.mac})</span>: {nicRefusalText(n.reason)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-3 border-t border-vx-hairline pt-4">
+              <Button type="submit" variant="primary" disabled={unchanged}>
+                Apply
+              </Button>
+              <p className="min-w-0 flex-1 text-[13px] text-vx-fg-muted">
+                The box must not manage this port itself (no NetworkManager, netplan or ifupdown configuration): see
+                docs/DEPLOY.md. Applying takes effect at once.
+              </p>
+            </div>
+          </form>
+        )}
+
+        {status && status.state === 'active' && (
+          <section aria-labelledby="pn-clients" className="space-y-3">
+            <h2 id="pn-clients" className="vx-label">
+              Devices on the network
+            </h2>
+            {status.clients.length === 0 ? (
+              <EmptyState icon={<Cable />} title="No devices yet">
+                Plug a phone with an ethernet adapter into the switch. It shows up here once it gets an address.
+              </EmptyState>
+            ) : (
+              <DataTable
+                caption="Devices on the phone network"
+                rows={status.clients}
+                rowKey={(c) => c.mac}
+                columns={[
+                  { key: 'ip', header: 'Address', primary: true, cell: (c) => <span className="font-mono text-[13px]">{c.ip}</span> },
+                  { key: 'mac', header: 'MAC', cell: (c) => <span className="font-mono text-[13px]">{c.mac}</span> },
+                  { key: 'name', header: 'Name', cell: (c) => <span className="text-sm">{c.hostname || '—'}</span> },
+                  {
+                    key: 'phone',
+                    header: 'Phone',
+                    cell: (c) =>
+                      c.serial ? (
+                        <span className="font-mono text-[13px]">{c.serial}</span>
+                      ) : (
+                        <span className="text-sm text-vx-fg-muted">Not a phone (no internet)</span>
+                      ),
+                  },
+                ]}
+              />
+            )}
+          </section>
+        )}
+      </PageBody>
+
+      <ConfirmDialog
+        open={confirming}
+        onClose={() => setConfirming(false)}
+        tone="primary"
+        title={choice ? `Apply port ${portName}?` : 'Turn off the phone network?'}
+        confirmLabel={choice ? 'Apply' : 'Turn off'}
+        consequence={
+          choice ? (
+            <>
+              Batter takes <span className="font-mono text-vx-fg">{portName}</span> for the phone network and moves it
+              out of the box&apos;s own network, so the box has no connection on it. Phones on the network may lose their
+              connection while it changes. It takes effect at once.
+            </>
+          ) : (
+            <>Phones on the network lose their connection and get no internet until you choose a port again.</>
+          )
+        }
+        formatError={(e) => errorMessage(e, 'change the phone network')}
+        onConfirm={async () => {
+          const mac = choice || null;
+          setStatus(await setPhoneNetworkPort(mac));
+          setChoice(mac ?? '');
+          toast.success(mac ? `Phone network applied to ${portName}.` : 'Phone network turned off.');
+          await load();
+        }}
+      />
     </>
+  );
+}
+
+function PortOption({
+  checked,
+  onSelect,
+  title,
+  detail,
+  mono,
+}: {
+  checked: boolean;
+  onSelect: () => void;
+  title: string;
+  detail: string;
+  mono?: boolean;
+}) {
+  return (
+    <label
+      className={cx(
+        'flex min-h-touch cursor-pointer items-start gap-3 border px-3 py-2.5 transition-colors',
+        checked ? 'border-vx-accent bg-vx-accent/5' : 'border-vx-hairline hover:border-vx-control',
+      )}
+    >
+      <input type="radio" name="port" checked={checked} onChange={onSelect} className="mt-1 h-4 w-4 accent-vx-accent" />
+      <span className="min-w-0">
+        <span className={cx('block text-sm text-vx-fg', mono && 'font-mono')}>{title}</span>
+        <span className="block break-words font-mono text-xs text-vx-fg-label">{detail}</span>
+      </span>
+    </label>
   );
 }

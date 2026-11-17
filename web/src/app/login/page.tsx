@@ -4,6 +4,9 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { login, checkNeedsSetup, setup } from '@/lib/api';
 import { setAuth, getToken } from '@/lib/auth';
+import { errorMessage } from '@/lib/api-error';
+import { Logomark } from '@/components/layout/sidebar';
+import { Button, Field, FormError } from '@/components/ui';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -31,8 +34,8 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
 
+    const firstRun = needsSetup;
     try {
-      const firstRun = needsSetup;
       if (needsSetup) {
         await setup(username, password, email || undefined);
         setNeedsSetup(false);
@@ -44,7 +47,7 @@ export default function LoginPage() {
       // First run: offer the phone network's port (optional) before the dashboard.
       router.push(firstRun ? '/admin/phone-network?setup=1' : '/dashboard');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      setError(errorMessage(err, firstRun ? 'create the account' : 'sign in'));
     } finally {
       setLoading(false);
     }
@@ -52,77 +55,83 @@ export default function LoginPage() {
 
   if (checking) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-gray-500">Loading...</div>
+      <div className="flex min-h-dvh items-center justify-center bg-vx-canvas">
+        <div role="status" className="flex items-center gap-3 text-vx-fg-muted">
+          <Logomark />
+          <span className="vx-label">Loading</span>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-950">
-      <div className="w-full max-w-sm p-8">
-        <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold text-white">Batter</h1>
-          <p className="text-sm text-gray-400 mt-1">
-            {needsSetup ? 'Create admin account' : 'Remote Phone Management'}
+    <main className="flex min-h-dvh items-center justify-center bg-vx-canvas px-4 py-8">
+      <div className="w-full max-w-[400px] border border-vx-hairline bg-vx-surface rounded-md">
+        <div className="border-b border-vx-hairline px-6 pb-5 pt-6 sm:px-8">
+          <div className="flex items-center gap-3">
+            <Logomark className="h-8 w-8" />
+            <span className="text-xl font-extrabold tracking-wide text-vx-fg">Batter</span>
+          </div>
+          <h1 className="mt-5 text-[26px] leading-tight">
+            {needsSetup ? 'Create the admin account' : 'Sign in'}
+          </h1>
+          <p className="mt-1.5 text-sm text-vx-fg-muted">
+            {needsSetup
+              ? 'First run. This account manages users, phones and the phone network.'
+              : 'Remote phone management.'}
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">Username</label>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-5 px-6 py-6 sm:px-8">
+          <Field label="Username">
             <input
               type="text"
+              name="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-brand-500"
-              placeholder="admin"
+              className="vx-input"
+              autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               required
               autoFocus
             />
-          </div>
+          </Field>
 
           {needsSetup && (
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Email (optional)</label>
+            <Field label="Email (optional)" hint="Used for account notices only.">
               <input
                 type="email"
+                name="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-brand-500"
-                placeholder="admin@example.com"
+                className="vx-input"
+                autoComplete="email"
               />
-            </div>
+            </Field>
           )}
 
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">Password</label>
+          <Field label="Password" hint={needsSetup ? 'At least 8 characters.' : undefined}>
             <input
               type="password"
+              name="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-brand-500"
-              placeholder="Min 8 characters"
+              className="vx-input"
+              autoComplete={needsSetup ? 'new-password' : 'current-password'}
               required
               minLength={8}
             />
-          </div>
+          </Field>
 
-          {error && (
-            <div className="text-red-400 text-sm bg-red-900/20 border border-red-800/50 rounded-lg px-3 py-2">
-              {error}
-            </div>
-          )}
+          <FormError>{error}</FormError>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
-          >
-            {loading ? 'Please wait...' : needsSetup ? 'Create Admin & Login' : 'Sign In'}
-          </button>
+          <Button type="submit" variant="primary" size="lg" className="w-full" disabled={loading}>
+            {loading ? 'Working…' : needsSetup ? 'Create admin and sign in' : 'Sign in'}
+          </Button>
         </form>
       </div>
-    </div>
+    </main>
   );
 }

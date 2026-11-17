@@ -1,89 +1,70 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import { KeyRound, MoreHorizontal, Plus, Trash2, UserCheck, UserX, Users } from 'lucide-react';
 import { getToken, isAdmin } from '@/lib/auth';
 import {
   listUsers, createUser, updateUser, deleteUser,
   listUserAccess, revokeUserAccess, resetPassword,
-  listUserGroups, listUserGroupMembers,
-  type UserInfo, type UserAccessGrant, type UserGroup, type UserGroupMember,
+  listUserGroups, listUserGroupMembers, listDevices,
+  type UserInfo, type UserAccessGrant,
 } from '@/lib/api';
+import { errorMessage } from '@/lib/api-error';
+import { useUser } from '@/lib/use-user';
+import { displayName } from '@/lib/dashboard-filter';
+import {
+  Banner, Button, ConfirmDialog, Dialog, EmptyState, Field, FormError, Menu, PageHeader, StatusGlyph, useToast,
+  type MenuItem,
+} from '@/components/ui';
+import { DataTable } from '@/components/admin/data-table';
+import { Monogram, RoleChip } from '@/components/admin/chips';
+import { GrantsTable, grantTarget } from '@/components/admin/grants-table';
+import { PageBody } from '@/components/admin/page-body';
+import { ROLES, ROLE_CAN, ROLE_LABEL, isRole, roleArticle, type Role } from '@/components/admin/roles';
 
-// Avatar color palette based on first letter
-function getAvatarColor(name: string): { bg: string; text: string } {
-  const letter = (name || '?')[0].toUpperCase();
-  const code = letter.charCodeAt(0);
-  if (code <= 68) return { bg: 'bg-blue-600/20', text: 'text-blue-400' };
-  if (code <= 72) return { bg: 'bg-green-600/20', text: 'text-green-400' };
-  if (code <= 76) return { bg: 'bg-purple-600/20', text: 'text-purple-400' };
-  if (code <= 80) return { bg: 'bg-orange-600/20', text: 'text-orange-400' };
-  if (code <= 84) return { bg: 'bg-cyan-600/20', text: 'text-cyan-400' };
-  return { bg: 'bg-pink-600/20', text: 'text-pink-400' };
-}
-
-function getInitials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return name.substring(0, 2).toUpperCase();
-}
-
-function roleBadgeClass(role: string): string {
-  if (role === 'admin') return 'bg-red-900/30 text-red-400';
-  if (role === 'operator') return 'bg-blue-900/30 text-blue-400';
-  return 'bg-gray-800 text-gray-400';
-}
-
-function permissionBadgeClass(perm: string): string {
-  if (perm === 'manage') return 'bg-red-900/30 text-red-400';
-  if (perm === 'control') return 'bg-blue-900/30 text-blue-400';
-  return 'bg-gray-800 text-gray-400';
-}
-
-const ChevronIcon = ({ expanded }: { expanded: boolean }) => (
-  <svg className={`w-4 h-4 text-gray-500 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-  </svg>
-);
-
-const XIcon = () => (
-  <svg className="w-3.5 h-3.5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-  </svg>
-);
-
-type Tab = 'details' | 'access' | 'settings';
+// The backend hashes with bcrypt and refuses anything under 8 characters
+// (internal/auth/password.go). It sets no other rule.
+const MIN_PASSWORD = 8;
+const PASSWORD_RULE = `At least ${MIN_PASSWORD} characters.`;
 
 interface TeamMembership {
   teamId: string;
   teamName: string;
 }
 
+function nameOf(u: UserInfo): string {
+  return u.display_name || u.username;
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString();
+}
+
 export default function AdminUsersPage() {
   const router = useRouter();
-  const [users, setUsers] = useState<UserInfo[]>([]);
-  const [showCreate, setShowCreate] = useState(false);
-  const [newUsername, setNewUsername] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [newRole, setNewRole] = useState('viewer');
-  const [error, setError] = useState('');
-  const [expandedUser, setExpandedUser] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>('details');
+  const toast = useToast();
+  const { user: current } = useUser();
+  const me = current?.id ?? null;
+  const [users, setUsers] = useState<UserInfo[] | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [deviceNames, setDeviceNames] = useState<Record<string, string>>({});
 
-  // Expanded user data
-  const [userGrants, setUserGrants] = useState<UserAccessGrant[]>([]);
-  const [teamMemberships, setTeamMemberships] = useState<TeamMembership[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [roleTarget, setRoleTarget] = useState<{ user: UserInfo; role: Role } | null>(null);
+  const [disableTarget, setDisableTarget] = useState<UserInfo | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<UserInfo | null>(null);
+  const [resetTarget, setResetTarget] = useState<UserInfo | null>(null);
 
-  // Details tab
-  const [editRole, setEditRole] = useState('');
-  const [detailsSaved, setDetailsSaved] = useState('');
-
-  // Settings tab
-  const [newPw, setNewPw] = useState('');
-  const [pwError, setPwError] = useState('');
-  const [pwSuccess, setPwSuccess] = useState('');
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleteError, setDeleteError] = useState('');
+  // The access dialog for one user.
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [grants, setGrants] = useState<UserAccessGrant[]>([]);
+  const [teams, setTeams] = useState<TeamMembership[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
+  const [revokeTarget, setRevokeTarget] = useState<UserAccessGrant | null>(null);
+  const detailReq = useRef(0);
 
   useEffect(() => {
     if (!getToken()) { router.replace('/login'); return; }
@@ -91,418 +72,610 @@ export default function AdminUsersPage() {
   }, [router]);
 
   const fetchUsers = useCallback(async () => {
+    setRefreshing(true);
     try {
-      const data = await listUsers();
-      setUsers(data);
-    } catch { /* ignore */ }
+      setUsers(await listUsers());
+      setLoadError('');
+    } catch (e) {
+      setLoadError(errorMessage(e, 'load users'));
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
 
-  const handleCreate = async () => {
-    setError('');
+  // Phone names for the access list. Without them the list falls back to serials.
+  useEffect(() => {
+    listDevices()
+      .then((ds) => setDeviceNames(Object.fromEntries(ds.map((d) => [d.serial, displayName(d)]))))
+      .catch(() => { /* names are a nicety; serials still show */ });
+  }, []);
+
+  const loadDetails = useCallback(async (userId: string) => {
+    const req = ++detailReq.current;
+    setDetailLoading(true);
+    setDetailError('');
     try {
-      await createUser(newUsername, newPassword, newRole);
-      setNewUsername('');
-      setNewPassword('');
-      setNewRole('viewer');
-      setShowCreate(false);
+      const [g, t] = await Promise.all([listUserAccess(userId), loadTeamMemberships(userId)]);
+      if (req !== detailReq.current) return;
+      setGrants(g);
+      setTeams(t);
+    } catch (e) {
+      if (req !== detailReq.current) return;
+      setDetailError(errorMessage(e, 'load access'));
+    } finally {
+      if (req === detailReq.current) setDetailLoading(false);
+    }
+  }, []);
+
+  const openDetail = (u: UserInfo) => {
+    setGrants([]);
+    setTeams([]);
+    setDetailId(u.id);
+    loadDetails(u.id);
+  };
+
+  const detailUser = users?.find((u) => u.id === detailId) ?? null;
+
+  const enable = async (u: UserInfo) => {
+    try {
+      await updateUser(u.id, { is_active: true });
+      toast.success(`${nameOf(u)} enabled.`);
       fetchUsers();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to create user');
+    } catch (e) {
+      toast.error(errorMessage(e, 'enable the user'));
     }
   };
 
-  const toggleExpand = async (userId: string) => {
-    if (expandedUser === userId) {
-      setExpandedUser(null);
-      return;
-    }
-    setExpandedUser(userId);
-    setActiveTab('details');
-    setConfirmDelete(false);
-    setDeleteError('');
-    setPwError('');
-    setPwSuccess('');
-    setNewPw('');
-
-    const user = users.find(u => u.id === userId);
-    if (user) setEditRole(user.role);
-
-    loadUserDetails(userId);
+  const menuItems = (u: UserInfo): (MenuItem | 'separator')[] => {
+    const isMe = u.id === me;
+    const items: (MenuItem | 'separator')[] = [
+      ...ROLES.filter((r) => r !== u.role).map<MenuItem>((r) => ({
+        label: `Make ${r}`,
+        icon: <Users />,
+        onSelect: () => setRoleTarget({ user: u, role: r }),
+        // Demoting yourself could leave no admin to undo it.
+        disabled: isMe,
+        disabledReason: "You can't change your own role.",
+      })),
+      u.is_active
+        ? {
+            label: 'Disable user',
+            icon: <UserX />,
+            onSelect: () => setDisableTarget(u),
+            disabled: isMe,
+            disabledReason: "You can't disable your own account.",
+          }
+        : { label: 'Enable user', icon: <UserCheck />, onSelect: () => enable(u) },
+      { label: 'Reset password', icon: <KeyRound />, onSelect: () => setResetTarget(u) },
+      'separator',
+      {
+        label: 'Delete user',
+        icon: <Trash2 />,
+        danger: true,
+        onSelect: () => setDeleteTarget(u),
+        disabled: isMe,
+        disabledReason: "You can't delete your own account.",
+      },
+    ];
+    return items;
   };
-
-  const loadUserDetails = async (userId: string) => {
-    try {
-      const [grants, teams] = await Promise.all([
-        listUserAccess(userId),
-        loadTeamMemberships(userId),
-      ]);
-      setUserGrants(grants);
-      setTeamMemberships(teams);
-    } catch {
-      setUserGrants([]);
-      setTeamMemberships([]);
-    }
-  };
-
-  const loadTeamMemberships = async (userId: string): Promise<TeamMembership[]> => {
-    try {
-      const teams = await listUserGroups();
-      const memberships: TeamMembership[] = [];
-      for (const team of teams) {
-        const members = await listUserGroupMembers(team.id);
-        if (members.some(m => m.user_id === userId)) {
-          memberships.push({ teamId: team.id, teamName: team.name });
-        }
-      }
-      return memberships;
-    } catch {
-      return [];
-    }
-  };
-
-  const handleRoleChange = async (userId: string, newRole: string) => {
-    try {
-      await updateUser(userId, { role: newRole });
-      setEditRole(newRole);
-      setDetailsSaved('Role updated');
-      fetchUsers();
-      setTimeout(() => setDetailsSaved(''), 2000);
-    } catch { /* ignore */ }
-  };
-
-  const handleToggleActive = async (userId: string, isActive: boolean) => {
-    try {
-      await updateUser(userId, { is_active: !isActive });
-      setDetailsSaved(isActive ? 'Disabled' : 'Enabled');
-      fetchUsers();
-      setTimeout(() => setDetailsSaved(''), 2000);
-    } catch { /* ignore */ }
-  };
-
-  const handleRevokeAccess = async (userId: string, accessId: string) => {
-    await revokeUserAccess(userId, accessId);
-    loadUserDetails(userId);
-  };
-
-  const handleResetPassword = async (userId: string) => {
-    setPwError('');
-    setPwSuccess('');
-    try {
-      await resetPassword(userId, newPw);
-      setNewPw('');
-      setPwSuccess('Password reset successfully');
-      setTimeout(() => setPwSuccess(''), 3000);
-    } catch (e: unknown) {
-      setPwError(e instanceof Error ? e.message : 'Failed to reset password');
-    }
-  };
-
-  const handleDeleteUser = async (userId: string) => {
-    setDeleteError('');
-    try {
-      await deleteUser(userId);
-      setExpandedUser(null);
-      fetchUsers();
-    } catch (e: unknown) {
-      setDeleteError(e instanceof Error ? e.message : 'Failed to delete user');
-    }
-  };
-
-  const getExpandedUser = () => users.find(u => u.id === expandedUser);
 
   return (
     <>
-      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
-        <div>
-          <h2 className="text-lg font-semibold text-white">Users</h2>
-          <p className="text-xs text-gray-500">{users.length} user{users.length !== 1 ? 's' : ''}</p>
-        </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="px-3 py-2 text-xs bg-brand-600 hover:bg-brand-700 text-white rounded-lg"
-        >
-          New User
-        </button>
-      </div>
+      <PageHeader
+        eyebrow="Admin"
+        title="Users"
+        sub={
+          <span>
+            Who can sign in to Batter, and what each person can do.
+            {users && ` ${users.length} ${users.length === 1 ? 'user' : 'users'}.`}
+          </span>
+        }
+        actions={
+          <Button variant="primary" icon={<Plus size={16} />} onClick={() => setCreating(true)}>
+            New user
+          </Button>
+        }
+      />
 
-      <div className="flex-1 overflow-auto">
-        <div className="max-w-4xl mx-auto p-6 space-y-4">
-          {showCreate && (
-            <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
-              <input
-                type="text"
-                value={newUsername}
-                onChange={(e) => setNewUsername(e.target.value)}
-                placeholder="Username"
-                className="w-full px-3 py-2 bg-gray-950 border border-gray-800 rounded-lg text-xs text-white placeholder-gray-600 focus:outline-none focus:border-brand-600"
-                autoFocus
-              />
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Password (min 8 chars)"
-                className="w-full px-3 py-2 bg-gray-950 border border-gray-800 rounded-lg text-xs text-white placeholder-gray-600 focus:outline-none focus:border-brand-600"
-              />
-              <select
-                value={newRole}
-                onChange={(e) => setNewRole(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-950 border border-gray-800 rounded-lg text-xs text-white"
-              >
-                <option value="viewer">Viewer (watch only)</option>
-                <option value="operator">Operator (view + control)</option>
-                <option value="admin">Admin (full access)</option>
-              </select>
-              {error && <div className="text-red-400 text-xs">{error}</div>}
-              <div className="flex gap-2">
-                <button onClick={handleCreate} className="px-3 py-2 text-xs bg-brand-600 hover:bg-brand-700 text-white rounded-lg">Create</button>
-                <button onClick={() => { setShowCreate(false); setError(''); }} className="px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg">Cancel</button>
-              </div>
-            </div>
-          )}
+      <PageBody>
+        {loadError && (
+          <Banner
+            tone="danger"
+            actions={
+              <Button size="sm" onClick={fetchUsers} disabled={refreshing}>
+                Retry
+              </Button>
+            }
+          >
+            {loadError}
+          </Banner>
+        )}
 
-          {users.length === 0 && !showCreate && (
-            <div className="text-center py-12 text-gray-500 text-sm">No users found.</div>
-          )}
+        {users === null && !loadError && (
+          <div role="status" className="border border-vx-hairline bg-vx-surface px-4 py-10 text-center text-sm text-vx-fg-muted">
+            Loading users…
+          </div>
+        )}
 
-          {users.map(user => {
-            const isExpanded = expandedUser === user.id;
-            const colors = getAvatarColor(user.display_name || user.username);
+        {users && users.length === 0 && (
+          <EmptyState
+            icon={<Users />}
+            title="No users yet"
+            action={
+              <Button variant="primary" icon={<Plus size={16} />} onClick={() => setCreating(true)}>
+                New user
+              </Button>
+            }
+          >
+            Add a user to let someone sign in.
+          </EmptyState>
+        )}
 
-            return (
-              <div key={user.id} className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-                {/* Card header */}
-                <div
-                  className="flex items-center justify-between px-5 py-4 cursor-pointer hover:bg-gray-800/30"
-                  onClick={() => toggleExpand(user.id)}
-                >
-                  <div className="flex items-center gap-4">
-                    <div className={`h-9 w-9 rounded-full ${colors.bg} flex items-center justify-center ${colors.text} font-bold text-sm`}>
-                      {getInitials(user.display_name || user.username)}
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-white font-medium">{user.display_name || user.username}</span>
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${roleBadgeClass(user.role)}`}>{user.role}</span>
-                      </div>
-                      <div className="text-xs text-gray-500">@{user.username}</div>
+        {users && users.length > 0 && (
+          <DataTable
+            caption="Users"
+            rows={users}
+            rowKey={(u) => u.id}
+            refreshing={refreshing}
+            columns={[
+              {
+                key: 'user',
+                header: 'User',
+                primary: true,
+                cell: (u) => (
+                  <div className="flex items-center gap-3">
+                    <Monogram name={nameOf(u)} />
+                    <div className="min-w-0 flex-1">
+                      <button
+                        type="button"
+                        onClick={() => openDetail(u)}
+                        className="-mx-1 block max-w-full truncate rounded-sm px-1 text-left font-semibold text-vx-fg hover:text-vx-accent"
+                      >
+                        {nameOf(u)}
+                      </button>
+                      <div className="truncate font-mono text-xs text-vx-fg-label">@{u.username}</div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2">
-                      <div className={`w-2 h-2 rounded-full ${user.is_active ? 'bg-green-500' : 'bg-gray-600'}`} />
-                      <span className="text-[10px] text-gray-500">{user.is_active ? 'Active' : 'Disabled'}</span>
-                    </div>
-                    <span className="text-[10px] text-gray-500">
-                      {user.last_login_at ? `Last login ${new Date(user.last_login_at).toLocaleDateString()}` : 'Never logged in'}
-                    </span>
-                    <ChevronIcon expanded={isExpanded} />
-                  </div>
-                </div>
+                ),
+              },
+              { key: 'role', header: 'Role', cell: (u) => <RoleChip role={u.role} /> },
+              {
+                key: 'status',
+                header: 'Status',
+                cell: (u) => (
+                  <span
+                    className={`inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wide ${
+                      u.is_active ? 'text-vx-fg-muted' : 'text-vx-fg-label'
+                    }`}
+                  >
+                    <StatusGlyph icon={u.is_active ? 'dot' : 'slash'} />
+                    {u.is_active ? 'Active' : 'Disabled'}
+                  </span>
+                ),
+              },
+              {
+                key: 'login',
+                header: 'Last sign-in',
+                cell: (u) =>
+                  u.last_login_at ? (
+                    <span className="text-[13px] text-vx-fg-muted">{formatDate(u.last_login_at)}</span>
+                  ) : (
+                    <span className="text-[13px] text-vx-fg-label">Never</span>
+                  ),
+              },
+            ]}
+            actions={(u) => (
+              <>
+                <Button size="md" className="max-sm:h-touch" onClick={() => openDetail(u)}>
+                  Access
+                </Button>
+                <Menu
+                  items={menuItems(u)}
+                  trigger={(p) => (
+                    <Button
+                      {...p}
+                      variant="quiet"
+                      iconOnly
+                      aria-label={`More actions for ${nameOf(u)}`}
+                      icon={<MoreHorizontal size={16} />}
+                      className="max-sm:h-touch max-sm:w-touch"
+                    />
+                  )}
+                />
+              </>
+            )}
+          />
+        )}
+      </PageBody>
 
-                {/* Expanded content */}
-                {isExpanded && (
-                  <>
-                    {/* Tabs */}
-                    <div className="flex border-t border-b border-gray-800 bg-gray-950/50">
-                      {(['details', 'access', 'settings'] as Tab[]).map(tab => (
-                        <button
-                          key={tab}
-                          onClick={() => { setActiveTab(tab); setConfirmDelete(false); }}
-                          className={`px-5 py-2.5 text-xs font-medium border-b-2 ${
-                            activeTab === tab
-                              ? 'text-brand-400 border-brand-500'
-                              : 'text-gray-500 hover:text-gray-300 border-transparent'
-                          }`}
-                        >
-                          {tab === 'details' ? 'Details' : tab === 'access' ? 'Access' : 'Settings'}
-                        </button>
-                      ))}
-                    </div>
+      <CreateUserDialog
+        open={creating}
+        onClose={() => setCreating(false)}
+        onCreate={async (username, password, role) => {
+          await createUser(username, password, role);
+          toast.success(`Created ${username}.`);
+          fetchUsers();
+        }}
+      />
 
-                    {/* Tab content */}
-                    <div className="p-5">
-                      {activeTab === 'details' && (() => {
-                        const u = getExpandedUser();
-                        if (!u) return null;
-                        return (
-                          <div className="space-y-4">
-                            <div className="grid grid-cols-2 gap-4">
-                              <div>
-                                <label className="block text-xs text-gray-400 mb-1">Role</label>
-                                <select
-                                  value={editRole}
-                                  onChange={(e) => handleRoleChange(u.id, e.target.value)}
-                                  className="w-full px-3 py-2 bg-gray-950 border border-gray-800 rounded-lg text-xs text-white"
-                                >
-                                  <option value="viewer">Viewer</option>
-                                  <option value="operator">Operator</option>
-                                  <option value="admin">Admin</option>
-                                </select>
-                              </div>
-                              <div>
-                                <label className="block text-xs text-gray-400 mb-1">Status</label>
-                                <button
-                                  onClick={() => handleToggleActive(u.id, u.is_active)}
-                                  className={`w-full px-3 py-2 rounded-lg text-xs text-left border ${
-                                    u.is_active
-                                      ? 'bg-green-900/10 border-green-800/30 text-green-400'
-                                      : 'bg-gray-950 border-gray-800 text-gray-400'
-                                  }`}
-                                >
-                                  {u.is_active ? 'Active (click to disable)' : 'Disabled (click to enable)'}
-                                </button>
-                              </div>
-                            </div>
-                            {detailsSaved && <span className="text-xs text-green-400">{detailsSaved}</span>}
+      <ConfirmDialog
+        open={!!roleTarget}
+        onClose={() => setRoleTarget(null)}
+        title={roleTarget ? `Make ${nameOf(roleTarget.user)} ${roleArticle(roleTarget.role)} ${roleTarget.role}?` : ''}
+        tone="primary"
+        confirmLabel={roleTarget ? `Make ${roleTarget.role}` : 'Confirm'}
+        consequence={
+          roleTarget && (
+            <>
+              {roleArticle(roleTarget.role) === 'an' ? 'An' : 'A'} {roleTarget.role} can {ROLE_CAN[roleTarget.role]}.
+            </>
+          )
+        }
+        formatError={(e) => errorMessage(e, 'change the role')}
+        onConfirm={async () => {
+          if (!roleTarget) return;
+          await updateUser(roleTarget.user.id, { role: roleTarget.role });
+          toast.success(`${nameOf(roleTarget.user)} is now ${roleArticle(roleTarget.role)} ${roleTarget.role}.`);
+          fetchUsers();
+        }}
+      />
 
-                            <div className="grid grid-cols-2 gap-4 pt-2 border-t border-gray-800/50">
-                              <div>
-                                <span className="text-[10px] text-gray-500 uppercase tracking-wider">Last Login</span>
-                                <div className="text-sm text-gray-300 mt-0.5">
-                                  {u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'Never'}
-                                </div>
-                              </div>
-                              <div>
-                                <span className="text-[10px] text-gray-500 uppercase tracking-wider">Created</span>
-                                <div className="text-sm text-gray-300 mt-0.5">
-                                  {new Date(u.created_at).toLocaleDateString()}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })()}
+      {/* The backend blocks a disabled account at sign-in and at token refresh
+          (handlers/auth.go); a token already issued runs until it expires. */}
+      <ConfirmDialog
+        open={!!disableTarget}
+        onClose={() => setDisableTarget(null)}
+        title={disableTarget ? `Disable ${nameOf(disableTarget)}?` : ''}
+        confirmLabel="Disable"
+        consequence={
+          disableTarget && (
+            <>
+              {nameOf(disableTarget)} can&apos;t sign in until you enable the account again. A sign-in that is already
+              open ends when its token expires.
+            </>
+          )
+        }
+        formatError={(e) => errorMessage(e, 'disable the user')}
+        onConfirm={async () => {
+          if (!disableTarget) return;
+          await updateUser(disableTarget.id, { is_active: false });
+          toast.success(`${nameOf(disableTarget)} disabled.`);
+          fetchUsers();
+        }}
+      />
 
-                      {activeTab === 'access' && (
-                        <div className="space-y-4">
-                          {/* Direct access grants */}
-                          <div>
-                            <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Direct Access</h4>
-                            {userGrants.length === 0 ? (
-                              <p className="text-xs text-gray-500">No direct access grants.</p>
-                            ) : (
-                              <div className="space-y-1">
-                                {userGrants.map(grant => (
-                                  <div key={grant.id} className="flex items-center justify-between px-3 py-2.5 rounded-lg hover:bg-gray-800/40 group">
-                                    <div className="flex items-center gap-3">
-                                      <div className="text-gray-500">
-                                        {grant.device_serial ? (
-                                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
-                                        ) : (
-                                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
-                                        )}
-                                      </div>
-                                      <div>
-                                        <div className="text-sm text-white">
-                                          {grant.device_serial || grant.group_name || grant.group_id}
-                                        </div>
-                                        <div className="text-[10px] text-gray-500">
-                                          {grant.device_serial ? 'Device' : 'Device Group'}
-                                        </div>
-                                      </div>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${permissionBadgeClass(grant.permission)}`}>{grant.permission}</span>
-                                      <button
-                                        onClick={() => handleRevokeAccess(expandedUser!, grant.id)}
-                                        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-900/20 transition-opacity"
-                                      >
-                                        <XIcon />
-                                      </button>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        title={deleteTarget ? `Delete ${nameOf(deleteTarget)}?` : ''}
+        confirmLabel="Delete"
+        consequence={<>This can&apos;t be undone.</>}
+        formatError={(e) => errorMessage(e, 'delete the user')}
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          await deleteUser(deleteTarget.id);
+          toast.success(`Deleted ${nameOf(deleteTarget)}.`);
+          if (detailId === deleteTarget.id) setDetailId(null);
+          fetchUsers();
+        }}
+      />
 
-                          {/* Team memberships */}
-                          <div className="pt-2 border-t border-gray-800/50">
-                            <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Team Memberships</h4>
-                            {teamMemberships.length === 0 ? (
-                              <p className="text-xs text-gray-500">Not a member of any team.</p>
-                            ) : (
-                              <div className="space-y-1">
-                                {teamMemberships.map(tm => (
-                                  <div key={tm.teamId} className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-gray-800/20">
-                                    <div className="text-gray-500">
-                                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
-                                    </div>
-                                    <span className="text-sm text-gray-300">{tm.teamName}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
+      <ResetPasswordDialog
+        user={resetTarget}
+        onClose={() => setResetTarget(null)}
+        onReset={async (u, password) => {
+          await resetPassword(u.id, password);
+          toast.success(`Password reset for ${nameOf(u)}.`);
+        }}
+      />
 
-                      {activeTab === 'settings' && (
-                        <div className="space-y-4">
-                          {/* Reset password */}
-                          <div>
-                            <label className="block text-xs text-gray-400 mb-1">Reset Password</label>
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="password"
-                                value={newPw}
-                                onChange={(e) => setNewPw(e.target.value)}
-                                placeholder="New password (min 8 chars)"
-                                className="flex-1 px-3 py-2 bg-gray-950 border border-gray-800 rounded-lg text-xs text-white placeholder-gray-600 focus:outline-none focus:border-brand-600"
-                              />
-                              <button
-                                onClick={() => handleResetPassword(expandedUser!)}
-                                disabled={!newPw || newPw.length < 8}
-                                className="px-3 py-2 text-xs bg-brand-600 hover:bg-brand-700 text-white rounded-lg disabled:opacity-50"
-                              >
-                                Reset
-                              </button>
-                            </div>
-                            {pwError && <div className="text-red-400 text-xs mt-1">{pwError}</div>}
-                            {pwSuccess && <div className="text-green-400 text-xs mt-1">{pwSuccess}</div>}
-                          </div>
+      <Dialog
+        open={!!detailUser}
+        onClose={() => setDetailId(null)}
+        size="lg"
+        title={detailUser ? nameOf(detailUser) : ''}
+        description={detailUser && <span className="font-mono text-[13px]">@{detailUser.username}</span>}
+        footer={<Button onClick={() => setDetailId(null)}>Close</Button>}
+      >
+        {detailUser && (
+          <div className="space-y-6">
+            <dl className="grid gap-px border border-vx-hairline bg-vx-hairline sm:grid-cols-4">
+              <Info label="Role">
+                <RoleChip role={detailUser.role} />
+              </Info>
+              <Info label="Status">{detailUser.is_active ? 'Active' : 'Disabled'}</Info>
+              <Info label="Last sign-in">
+                {detailUser.last_login_at ? new Date(detailUser.last_login_at).toLocaleString() : 'Never'}
+              </Info>
+              <Info label="Created">{formatDate(detailUser.created_at)}</Info>
+            </dl>
 
-                          {/* Delete user */}
-                          <div className="pt-4 border-t border-gray-800">
-                            {!confirmDelete ? (
-                              <button
-                                onClick={() => setConfirmDelete(true)}
-                                className="px-3 py-2 text-xs bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg"
-                              >
-                                Delete User
-                              </button>
-                            ) : (
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs text-red-400">Are you sure? This cannot be undone.</span>
-                                <button
-                                  onClick={() => handleDeleteUser(expandedUser!)}
-                                  className="px-3 py-2 text-xs bg-red-600 hover:bg-red-700 text-white rounded-lg"
-                                >
-                                  Yes, Delete
-                                </button>
-                                <button
-                                  onClick={() => setConfirmDelete(false)}
-                                  className="px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            )}
-                            {deleteError && <div className="text-red-400 text-xs mt-1">{deleteError}</div>}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+            {detailError && (
+              <FormError>{detailError}</FormError>
+            )}
+
+            <section aria-labelledby="direct-access" className="space-y-3" aria-busy={detailLoading || undefined}>
+              <h3 id="direct-access" className="vx-label">
+                Direct access
+              </h3>
+              {detailLoading && grants.length === 0 ? (
+                <p role="status" className="text-sm text-vx-fg-muted">
+                  Loading access…
+                </p>
+              ) : grants.length === 0 ? (
+                <p className="text-sm text-vx-fg-muted">No direct access. Anything they reach comes from a team.</p>
+              ) : (
+                <GrantsTable grants={grants} deviceNames={deviceNames} onRevoke={setRevokeTarget} />
+              )}
+            </section>
+
+            <section aria-labelledby="teams" className="space-y-3">
+              <h3 id="teams" className="vx-label">
+                Teams
+              </h3>
+              {detailLoading && teams.length === 0 ? (
+                <p role="status" className="text-sm text-vx-fg-muted">
+                  Loading teams…
+                </p>
+              ) : teams.length === 0 ? (
+                <p className="text-sm text-vx-fg-muted">Not in any team.</p>
+              ) : (
+                <ul className="grid gap-px border border-vx-hairline bg-vx-hairline">
+                  {teams.map((t) => (
+                    <li key={t.teamId} className="flex items-center gap-3 bg-vx-surface px-4 py-3 text-sm">
+                      <Users size={16} className="shrink-0 text-vx-fg-label" aria-hidden />
+                      {t.teamName}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+        )}
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!revokeTarget}
+        onClose={() => setRevokeTarget(null)}
+        title={
+          revokeTarget && detailUser
+            ? `Revoke ${nameOf(detailUser)}'s access to ${grantTarget(revokeTarget, deviceNames)}?`
+            : ''
+        }
+        confirmLabel="Revoke"
+        consequence={
+          revokeTarget && detailUser && (
+            <>
+              {nameOf(detailUser)} can&apos;t open {grantTarget(revokeTarget, deviceNames)} again through this
+              grant. Access from a team is not affected.
+            </>
+          )
+        }
+        formatError={(e) => errorMessage(e, 'revoke access')}
+        onConfirm={async () => {
+          if (!revokeTarget || !detailUser) return;
+          await revokeUserAccess(detailUser.id, revokeTarget.id);
+          toast.success(`Revoked access to ${grantTarget(revokeTarget, deviceNames)}.`);
+          loadDetails(detailUser.id);
+        }}
+      />
     </>
+  );
+}
+
+// One request per team, as before: the API has no "teams of this user" call.
+async function loadTeamMemberships(userId: string): Promise<TeamMembership[]> {
+  const teams = await listUserGroups();
+  const memberships: TeamMembership[] = [];
+  for (const team of teams) {
+    const members = await listUserGroupMembers(team.id);
+    if (members.some((m) => m.user_id === userId)) {
+      memberships.push({ teamId: team.id, teamName: team.name });
+    }
+  }
+  return memberships;
+}
+
+function Info({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-vx-surface px-4 py-3">
+      <dt className="vx-label">{label}</dt>
+      <dd className="mt-1 text-sm text-vx-fg">{children}</dd>
+    </div>
+  );
+}
+
+function CreateUserDialog({
+  open,
+  onClose,
+  onCreate,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreate: (username: string, password: string, role: string) => Promise<void>;
+}) {
+  const formId = useId();
+  const nameRef = useRef<HTMLInputElement>(null);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [role, setRole] = useState<Role>('viewer');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [pwError, setPwError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setUsername('');
+    setPassword('');
+    setRole('viewer');
+    setError('');
+    setPwError('');
+    nameRef.current?.focus();
+  }, [open]);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setError('');
+    setPwError('');
+    if (password.length < MIN_PASSWORD) {
+      setPwError(PASSWORD_RULE);
+      return;
+    }
+    setBusy(true);
+    try {
+      await onCreate(username.trim(), password, role);
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err, 'create the user'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      busy={busy}
+      title="New user"
+      description="They sign in with this username and password."
+      footer={
+        <>
+          <Button variant="quiet" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button type="submit" form={formId} variant="primary" disabled={busy || !username.trim() || !password}>
+            {busy ? 'Creating…' : 'Create user'}
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-4">
+        <Field label="Username">
+          <input
+            ref={nameRef}
+            className="vx-input"
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+          />
+        </Field>
+        <Field label="Password" hint={PASSWORD_RULE} error={pwError}>
+          <input
+            className="vx-input"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="new-password"
+            required
+          />
+        </Field>
+        <Field label="Role" hint={`${ROLE_LABEL[role]}: ${ROLE_CAN[role]}.`}>
+          <select
+            className="vx-input"
+            value={role}
+            onChange={(e) => {
+              if (isRole(e.target.value)) setRole(e.target.value);
+            }}
+          >
+            {ROLES.map((r) => (
+              <option key={r} value={r}>
+                {ROLE_LABEL[r]}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <FormError>{error}</FormError>
+      </form>
+    </Dialog>
+  );
+}
+
+function ResetPasswordDialog({
+  user,
+  onClose,
+  onReset,
+}: {
+  user: UserInfo | null;
+  onClose: () => void;
+  onReset: (user: UserInfo, password: string) => Promise<void>;
+}) {
+  const formId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [pwError, setPwError] = useState('');
+  const open = !!user;
+
+  useEffect(() => {
+    if (!open) return;
+    setPassword('');
+    setError('');
+    setPwError('');
+    inputRef.current?.focus();
+  }, [open]);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!user || busy) return;
+    setError('');
+    setPwError('');
+    if (password.length < MIN_PASSWORD) {
+      setPwError(PASSWORD_RULE);
+      return;
+    }
+    setBusy(true);
+    try {
+      await onReset(user, password);
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err, 'reset the password'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      busy={busy}
+      title={user ? `Reset password for ${nameOf(user)}` : 'Reset password'}
+      description="Choose a new password and pass it on to them yourself."
+      footer={
+        <>
+          <Button variant="quiet" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button type="submit" form={formId} variant="primary" disabled={busy || !password}>
+            {busy ? 'Resetting…' : 'Reset password'}
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-4">
+        <Field label="New password" hint={PASSWORD_RULE} error={pwError}>
+          <input
+            ref={inputRef}
+            className="vx-input"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="new-password"
+            required
+          />
+        </Field>
+        <FormError>{error}</FormError>
+      </form>
+    </Dialog>
   );
 }

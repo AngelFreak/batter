@@ -37,22 +37,32 @@ export class FakeWebSocket {
 export function installBrowserEnv() {
   const g = globalThis as Record<string, unknown>;
   g.WebSocket = FakeWebSocket;
-  g.window = { location: { protocol: 'http:', host: 'test' } };
+  g.window = fakeWindow;
   g.localStorage = { getItem: () => 'tok' };
-  g.document = { addEventListener() {}, removeEventListener() {} };
+  g.document = fakeDocument;
 }
 
-export type FakeCanvas = HTMLCanvasElement & {
-  /** Fire a DOM event at the canvas's registered listeners. */
-  fire(type: string, event?: Record<string, unknown>): void;
-};
+type Listeners = Map<string, Set<(e: unknown) => void>>;
 
-export function fakeCanvas(): FakeCanvas {
-  const listeners = new Map<string, Set<(e: unknown) => void>>();
+/** A dispatched fake event; `defaultPrevented` records a preventDefault() call. */
+export type FiredEvent = Record<string, unknown> & { defaultPrevented: boolean };
+
+function fireAt(listeners: Listeners, type: string, event: Record<string, unknown>): FiredEvent {
+  const e = {
+    defaultPrevented: false,
+    preventDefault() {
+      e.defaultPrevented = true;
+    },
+    ...event,
+  };
+  listeners.get(type)?.forEach((fn) => fn(e));
+  return e;
+}
+
+function listenerTarget() {
+  const listeners: Listeners = new Map();
   return {
-    width: 0,
-    height: 0,
-    getContext: () => ({ drawImage() {} }),
+    listeners,
     addEventListener(type: string, fn: (e: unknown) => void) {
       if (!listeners.has(type)) listeners.set(type, new Set());
       listeners.get(type)!.add(fn);
@@ -60,13 +70,52 @@ export function fakeCanvas(): FakeCanvas {
     removeEventListener(type: string, fn: (e: unknown) => void) {
       listeners.get(type)?.delete(fn);
     },
+    fire(type: string, event: Record<string, unknown> = {}): FiredEvent {
+      return fireAt(listeners, type, event);
+    },
+  };
+}
+
+/**
+ * The fake `document`. Firing a key here stands for a key pressed while some
+ * other element (a button, a text field) has focus.
+ */
+export const fakeDocument = listenerTarget();
+
+/** The fake `window`. Firing `blur` here stands for the user switching to another app. */
+export const fakeWindow = { ...listenerTarget(), location: { protocol: 'http:', host: 'test' } };
+
+export type FakeCanvas = HTMLCanvasElement & {
+  /** Fire a DOM event at the canvas's registered listeners. */
+  fire(type: string, event?: Record<string, unknown>): FiredEvent;
+  /** How many times focus() was called. */
+  focusCalls: number;
+  /** How many times blur() was called. */
+  blurCalls: number;
+};
+
+export function fakeCanvas(): FakeCanvas {
+  const target = listenerTarget();
+  const canvas = {
+    width: 0,
+    height: 0,
+    tabIndex: -1,
+    focusCalls: 0,
+    blurCalls: 0,
+    getContext: () => ({ drawImage() {} }),
+    addEventListener: target.addEventListener,
+    removeEventListener: target.removeEventListener,
+    focus() {
+      canvas.focusCalls++;
+    },
+    blur() {
+      canvas.blurCalls++;
+    },
     // 400x800 at the page origin, so clientX/Y map to x/400, y/800.
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 800 }),
-    fire(type: string, event: Record<string, unknown> = {}) {
-      const e = { preventDefault() {}, ...event };
-      listeners.get(type)?.forEach((fn) => fn(e));
-    },
-  } as unknown as FakeCanvas;
+    fire: target.fire,
+  };
+  return canvas as unknown as FakeCanvas;
 }
 
 /** A small binary video packet (12-byte header, non-config) — enough to count as data. */
