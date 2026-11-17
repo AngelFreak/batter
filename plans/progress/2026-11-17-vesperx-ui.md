@@ -62,13 +62,20 @@ The fix is web-only, in `src/lib/control-probe.ts`:
 - **Browser:** Playwright 1.57 driving headless Chromium build 1243, at 1440×900 and
   390×844.
 
-Three passes, 51 checks:
+Four passes, 60 checks (59 passed):
 
 | Pass | What it covered | Result |
 |---|---|---|
 | 1 | Every page at both widths, with no sideways scroll | 18/18 |
 | 2 | Filters, empty and lost-connection states, delete confirm, card menu, viewer (keys marker, Shift+Esc, Wake toast, More, Clipboard, Stop confirm), drawer, Users role confirm, Groups expanded, Multiplexer banner, viewer role (no Add device, no Admin, Watch only, Wake disabled) | 23/23, after the fixes above |
 | 3 | Edit modal and focus return, wizard, own-role lock, VPN dialog, Multi View click to control, reconnect modal (stubbed), "Still starting" after 15s | 9/10 |
+
+| 4 | After code review: rebuilt server text on the phone-network page (API stubbed): warning, missing port, known and unknown refusals, malformed addresses, 390 with no sideways scroll | 8/8 |
+
+Pass 4 also confirmed that the viewer's audio tooltip shows no raw reason. That
+check is weak: fakeadb never reports audio as unavailable, so the browser never
+shows the rebuilt sentence, and `server-text.test.ts` is the only evidence for it.
+Screenshots: `phone-network-warning-1440.png` and `phone-network-missing-390.png`.
 
 The one pass-3 failure was the script's: it clicked "Create team" with an empty name,
 and that button is disabled by design. No pass made a request outside the app's

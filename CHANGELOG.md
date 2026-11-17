@@ -32,7 +32,10 @@ works the same way.
   from the multiplexer.
 - **Feedback for every action:** Wake, Screen off and Screenshot confirm with a
   message. Failures say what went wrong, using only the server's known
-  messages.
+  messages. System errors are no longer shown in the browser. That covers the
+  VPN apply error, phone-network port errors and warnings, why a port can't be
+  used, and why a phone has no audio. Each now gets a plain sentence, and the
+  detail stays in the server log.
 - **Dashboard:**
   - status tiles that count and filter;
   - search and sort;

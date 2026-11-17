@@ -1,7 +1,7 @@
 # Plan: VesperX visual overhaul of the web UI
 
 **Date:** 2026-11-17 · **Branch:** `feature/vesperx-ui` (worktree, from `main` @ e7917ec)
-**Status:** built and verified in the browser (see Deviations and Verification). Code review pending.
+**Status:** built, verified in the browser, and code-reviewed (Codex APPROVE, round 4). Awaiting the founder's go-ahead to push and open a PR for third-party review.
 
 ## What
 
@@ -386,6 +386,42 @@ allowlisted handler messages are shown." No new HIGH or MED issues.
 Presented to the founder, who had already chosen this direction ("Okay try the
 vesperx"); the build starts from this version.
 
+### Code review of the build (§2.2 on the diff)
+
+The reviewer is Codex CLI 0.160.0 (OpenAI), read-only sandbox. The author is
+Claude Opus 5.5 (Anthropic), so the vendor differs.
+
+**Round 1, 2026-11-17, on the whole branch: APPROVE WITH CHANGES.** One MED finding.
+The VPN page (`apply_error`) and the phone-network page (`status.error`) render
+backend error fields directly, so a command error like `nft: Operation not
+permitted` could reach the UI. The fix is commit 55fd6a5: those fields became
+fixed sentences that point to the server log.
+
+**Round 2, on 55fd6a5: APPROVE WITH CHANGES.** The finding was not fully
+resolved, because three fields were still verbatim: the phone-network
+`status.warning`, a port's refusal `n.reason`, and the viewer's `audio.reason`.
+The fix is commit 5e8948f, which adds `web/src/lib/server-text.ts`:
+- Each Go template is matched and rebuilt from validated pieces (interface
+  names, addresses).
+- Anything else becomes a fixed sentence.
+- Tests tie every template to the Go source, so drift fails `npm test`.
+
+**Round 3, on 5e8948f: APPROVE WITH CHANGES.**
+- P1: the `missing` state still showed `status.error` as written.
+- P2: the address and route patterns accepted malformed values
+  (`999.999.999.999/999`, `::::/`).
+
+The fix is commit 4dd6f6f. The missing-port message is rebuilt from a validated
+name and MAC. Addresses must parse as IPv4/IPv6 with a prefix that fits the
+family, or the whole reason is replaced.
+
+**Round 4, on 4dd6f6f: APPROVE.** "Round 3 findings are resolved … I found no new
+issue in the commit." Codex noted that some valid IPv4-embedded IPv6 forms fall
+back to the generic sentence, which is safe. Accepted as is.
+
+**Code-review consensus:** reached 2026-11-17, Codex approving at round 4. The
+third-party review before merge (§2.6) is still to come, on the PR.
+
 ## Deviations (found while building)
 
 - **Role gating is partial.** Per-device permission (view, control, manage) isn't in
@@ -418,11 +454,16 @@ vesperx"); the build starts from this version.
 ## Verification (done 2026-11-17)
 
 Details and the rig are in `plans/progress/2026-11-17-vesperx-ui.md`.
-- **Tests:** `npm test` 119/119, including the full palette scan; `tsc` and
+- **Tests:** `npm test` 126/126, including the full palette scan; `tsc` and
   `next build` are clean. Every new test was mutation-checked.
 - **Browser walk:** three passes against the production build, with the real
   backend and fakeadb, at 1440 and 390 wide: 51 checks, 50 passed. The one failure
   was a script error (a disabled button). There was no sideways scroll, and no request
   left the app's origin.
+- **Code-review fixes in the browser:** a fourth pass checked the rebuilt server text on
+  the phone-network page, with the API stubbed: the warning, the missing port, known
+  and unknown refusals, and malformed addresses. All 8 checks passed, at 1440 and 390
+  wide. The viewer's audio-reason tooltip isn't reachable with fakeadb, because it
+  never reports audio as unavailable. That path has unit tests only.
 - **Not shown:** live video in the new layout. fakeadb's frames aren't real H.264, and
   no real phone was used.
