@@ -45,6 +45,8 @@ export class CanvasKeys {
     target.addEventListener("keydown", this.handleKeyDown);
     target.addEventListener("keyup", this.handleKeyUp);
     target.addEventListener("blur", this.releaseAll);
+    // Switching to another app may not blur the canvas, and the keyups land there.
+    window.addEventListener("blur", this.releaseAll);
   }
 
   detach() {
@@ -53,6 +55,7 @@ export class CanvasKeys {
     this.target.removeEventListener("keydown", this.handleKeyDown);
     this.target.removeEventListener("keyup", this.handleKeyUp);
     this.target.removeEventListener("blur", this.releaseAll);
+    window.removeEventListener("blur", this.releaseAll);
     this.target = null;
   }
 

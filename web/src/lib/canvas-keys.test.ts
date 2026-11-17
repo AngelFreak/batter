@@ -2,7 +2,7 @@
 // against the real handlers, with listeners attached as in the browser.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { FakeWebSocket, installBrowserEnv, fakeCanvas, fakeDocument, FakeCanvas } from './test-browser-env';
+import { FakeWebSocket, installBrowserEnv, fakeCanvas, fakeDocument, fakeWindow, FakeCanvas } from './test-browser-env';
 
 installBrowserEnv();
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -95,6 +95,20 @@ for (const rig of rigs) {
     }
   });
 
+  test(`${rig.name}: a key held on the screen is released when the window loses focus`, () => {
+    const { canvas, ws } = rig.setup();
+    canvas.fire('keydown', keyA);
+    // Alt+Tab to another app: its keyup never reaches the page.
+    fakeWindow.fire('blur');
+    for (const w of ws) {
+      assert.deepEqual(
+        msgs(w).map((m) => [m.type, m.action, m.keycode]),
+        [['key', 0, 29], ['key', 1, 29]],
+        'held key not released exactly once',
+      );
+    }
+  });
+
   test(`${rig.name}: a keyup for a key pressed elsewhere sends nothing`, () => {
     const { canvas, ws } = rig.setup();
     fakeDocument.fire('keydown', keyA);
@@ -147,4 +161,20 @@ test('viewer: Ctrl+C and Cmd+C copy from the phone only with the screen focused'
   canvas.fire('keydown', { code: 'KeyC', key: 'c', ctrlKey: true });
   canvas.fire('keydown', { code: 'KeyC', key: 'c', metaKey: true });
   assert.deepEqual(msgs(ws[0]).map((m) => m.type), ['get_clipboard', 'get_clipboard']);
+});
+
+test('CanvasKeys: detaching stops listening to the window', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { CanvasKeys } = require('./canvas-keys') as typeof import('./canvas-keys');
+  const sent: unknown[] = [];
+  const keys = new CanvasKeys({ send: (m: unknown) => sent.push(m) } as never);
+  const canvas = fakeCanvas();
+  const before = fakeWindow.listeners.get('blur')?.size ?? 0;
+  keys.attach(canvas);
+  assert.equal(fakeWindow.listeners.get('blur')?.size ?? 0, before + 1);
+  keys.detach();
+  canvas.fire('keydown', { code: 'KeyA', key: 'a' });
+  fakeWindow.fire('blur');
+  assert.deepEqual(sent, []);
+  assert.equal(fakeWindow.listeners.get('blur')?.size ?? 0, before, 'window blur listener leaked');
 });

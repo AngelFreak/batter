@@ -37,7 +37,7 @@ export class FakeWebSocket {
 export function installBrowserEnv() {
   const g = globalThis as Record<string, unknown>;
   g.WebSocket = FakeWebSocket;
-  g.window = { location: { protocol: 'http:', host: 'test' } };
+  g.window = fakeWindow;
   g.localStorage = { getItem: () => 'tok' };
   g.document = fakeDocument;
 }
@@ -81,6 +81,9 @@ function listenerTarget() {
  * other element (a button, a text field) has focus.
  */
 export const fakeDocument = listenerTarget();
+
+/** The fake `window`. Firing `blur` here stands for the user switching to another app. */
+export const fakeWindow = { ...listenerTarget(), location: { protocol: 'http:', host: 'test' } };
 
 export type FakeCanvas = HTMLCanvasElement & {
   /** Fire a DOM event at the canvas's registered listeners. */
