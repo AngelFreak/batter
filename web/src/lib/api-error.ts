@@ -1,0 +1,110 @@
+// What the UI may say when an API call fails. The api.ts helpers throw an Error
+// carrying the server's `error` field, or their own fallback. Only messages the
+// handlers write as fixed strings are shown; anything else (a raw Go error, a
+// fallback, a network failure) becomes a generic sentence, so internal detail never reaches the
+// screen (CLAUDE.md §5). The list must match the literal `"error": "..."`
+// strings in internal/api; api-error.test.ts checks that both ways.
+
+export const KNOWN_API_ERRORS: ReadonlySet<string> = new Set([
+  "access grant not found",
+  "account is disabled",
+  "APK file is required",
+  "authorization header required",
+  "cannot delete yourself",
+  "control already claimed",
+  "couldn't read the phone's screen lock; is it connected?",
+  "couldn't remove the screen lock; is the phone connected and unlocked?",
+  "couldn't switch the phone's adb to the network; is it connected over USB?",
+  "database error",
+  "device not found",
+  "either device_serial or group_id is required",
+  "enter the phone's current PIN, password or pattern",
+  "exactly one of device_serial or group_id is required",
+  "failed to add member",
+  "failed to change the phone network",
+  "failed to create user",
+  "failed to delete device",
+  "failed to delete group",
+  "failed to delete user",
+  "failed to discover devices",
+  "failed to generate token",
+  "failed to grant access",
+  "failed to grant team access",
+  "failed to list access",
+  "failed to list devices",
+  "failed to list group access",
+  "failed to list group devices",
+  "failed to list groups",
+  "failed to list members",
+  "failed to list team access",
+  "failed to list the box's network ports",
+  "failed to list user access",
+  "failed to list user groups",
+  "failed to list users",
+  "failed to probe device",
+  "failed to process file",
+  "failed to push file to device",
+  "failed to read the phone network's state",
+  "failed to register device",
+  "failed to remove device",
+  "failed to remove member",
+  "failed to reset password",
+  "failed to revoke access",
+  "failed to revoke team access",
+  "failed to update device",
+  "failed to update group",
+  "failed to update user",
+  "failed to wake screen",
+  "file is required",
+  "file must be an APK",
+  "group name already exists",
+  "group not found",
+  "insufficient permissions",
+  "invalid authorization format",
+  "invalid credentials",
+  "invalid filename",
+  "invalid or expired token",
+  "invalid refresh token",
+  "invalid request",
+  "member not found",
+  "name cannot be empty",
+  "name is required",
+  "new_password is required",
+  "no access to this device",
+  "no active session for device",
+  "no screenshot available",
+  "not authenticated",
+  "only one of device_serial or group_id can be set",
+  "permission is required",
+  "permission must be view, control, or manage",
+  "refresh_token is required",
+  "role must be admin, operator, or viewer",
+  "serial is required",
+  "serials array is required",
+  "session expired or revoked",
+  "setup already completed",
+  "that didn't match; it counts as a failed unlock attempt on the phone",
+  "token query parameter required",
+  "too many requests, please try again later",
+  "unknown VPN profile",
+  "user not found or disabled",
+  "user not found",
+  "user_group_id and permission are required",
+  "user_id is required",
+  "username already exists",
+  "username and password are required",
+  "username, password, and role are required",
+]);
+
+/**
+ * The sentence to show for a failed action. `verb` completes "Couldn't ...",
+ * e.g. "stop the session".
+ */
+export function errorMessage(err: unknown, verb: string): string {
+  const generic = `Couldn't ${verb}. Try again.`;
+  const text = err instanceof Error ? err.message : undefined;
+  if (text && KNOWN_API_ERRORS.has(text)) {
+    return text.charAt(0).toUpperCase() + text.slice(1) + (/[.?!]$/.test(text) ? '' : '.');
+  }
+  return generic;
+}

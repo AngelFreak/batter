@@ -2,6 +2,109 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100;
+/* VesperX, screen mode. Channels (not hex) so Tailwind can add opacity. */
+:root {
+  --vx-canvas: 10 14 18; /* #0A0E12 */
+  --vx-recessed: 7 10 13; /* #070A0D */
+  --vx-surface: 12 17 22; /* #0C1116 */
+  --vx-elevated: 16 22 29; /* #10161D */
+  --vx-hairline: 35 41 47; /* #23292F */
+  --vx-control: 94 104 115; /* #5E6873: control borders, 3:1 on canvas */
+  --vx-fg: 233 236 239; /* #E9ECEF */
+  --vx-fg-muted: 152 162 173; /* #98A2AD */
+  --vx-fg-label: 138 148 158; /* #8A949E: labels, passes AA */
+  --vx-fg-dim: 94 104 115; /* #5E6873: decoration only, never text */
+  --vx-accent: 52 214 168; /* #34D6A8 */
+  --vx-accent-hover: 70 232 186; /* #46E8BA */
+  --vx-accent-ink: 6 35 26; /* #06231A */
+  --vx-warn: 214 148 60; /* #D6943C */
+  --vx-danger: 229 87 91; /* #E5575B */
+  color-scheme: dark;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-vx-canvas text-vx-fg font-sans antialiased;
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply font-extrabold tracking-headline;
+  }
+  ::selection {
+    background: rgb(var(--vx-accent) / 0.28);
+    color: #fff;
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--vx-accent));
+    outline-offset: 2px;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: rgb(var(--vx-fg-label));
+    opacity: 1;
+  }
+  select option {
+    background: rgb(var(--vx-elevated));
+  }
+  dialog::backdrop {
+    background: rgb(var(--vx-recessed) / 0.8);
+  }
+}
+
+@layer components {
+  /* Machine chrome: mono, uppercase, wide-tracked. */
+  .vx-label {
+    @apply font-mono text-[11px] uppercase tracking-label text-vx-fg-label;
+  }
+  .vx-eyebrow {
+    @apply font-mono text-[11px] uppercase tracking-eyebrow text-vx-accent;
+  }
+  /* Text inputs, selects and textareas. */
+  .vx-input {
+    @apply w-full h-touch px-3.5 bg-vx-canvas border border-vx-control rounded-sm text-[14.5px] text-vx-fg transition-colors;
+  }
+  .vx-input:focus {
+    @apply border-vx-accent;
+    outline: 2px solid rgb(var(--vx-accent));
+    outline-offset: 0;
+  }
+  .vx-input[aria-invalid='true'] {
+    @apply border-vx-danger;
+  }
+  textarea.vx-input {
+    @apply h-auto py-2.5;
+  }
+  /* A panel: hairline box on the surface colour. */
+  .vx-panel {
+    @apply bg-vx-surface border border-vx-hairline rounded-md;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@keyframes vx-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.vx-pulse {
+  animation: vx-pulse 2s ease-in-out infinite;
 }

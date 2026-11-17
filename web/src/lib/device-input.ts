@@ -1,4 +1,4 @@
-import { keycodeMap } from "./device-keymap";
+import { CanvasKeys } from "./canvas-keys";
 import { getToken } from "./auth";
 import { Reconnector } from "./reconnect";
 import { WheelGestures } from "./wheel-gesture";
@@ -118,6 +118,9 @@ export class DeviceInputHandler {
   }
 
   private handleMouseDown = (e: MouseEvent) => {
+    // preventDefault below stops the browser focusing the screen, so do it here:
+    // a press on the screen means typing goes to the phone.
+    this.canvas.focus();
     if (e.button !== 0) return;
     e.preventDefault();
     const { x, y } = this.getNormalizedCoords(e);
@@ -169,59 +172,15 @@ export class DeviceInputHandler {
     this.wheelGestures.wheel(e, this.getNormalizedCoords(e), this.canvas.getBoundingClientRect());
   };
 
-  private handleKeyDown = (e: KeyboardEvent) => {
-    // Ctrl+V / Cmd+V: paste host clipboard to device
-    if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
-      e.preventDefault();
+  private keys = new CanvasKeys({
+    send: (msg) => this.send(msg),
+    paste: () => {
       navigator.clipboard.readText().then(text => {
         if (text) this.sendSetClipboard(text, true);
       }).catch(() => {});
-      return;
-    }
-
-    // Ctrl+C / Cmd+C: request device clipboard
-    if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-      e.preventDefault();
-      this.sendGetClipboard();
-      return;
-    }
-
-    e.preventDefault();
-
-    const keycode = keycodeMap[e.code];
-    if (keycode !== undefined) {
-      this.send({
-        type: "key",
-        action: 0,
-        keycode,
-        repeat: e.repeat ? 1 : 0,
-        metastate: this.getMetastate(e),
-      });
-      return;
-    }
-
-    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-      this.send({
-        type: "text",
-        text: e.key,
-      });
-    }
-  };
-
-  private handleKeyUp = (e: KeyboardEvent) => {
-    e.preventDefault();
-
-    const keycode = keycodeMap[e.code];
-    if (keycode !== undefined) {
-      this.send({
-        type: "key",
-        action: 1,
-        keycode,
-        repeat: 0,
-        metastate: this.getMetastate(e),
-      });
-    }
-  };
+    },
+    copy: () => this.sendGetClipboard(),
+  });
 
   // Right-click is Back, as in scrcpy.
   private handleContextMenu = (e: Event) => {
@@ -229,22 +188,13 @@ export class DeviceInputHandler {
     this.nav("back");
   };
 
-  private getMetastate(e: KeyboardEvent): number {
-    let meta = 0;
-    if (e.shiftKey) meta |= 1;
-    if (e.altKey) meta |= 2;
-    if (e.ctrlKey) meta |= 0x1000;
-    return meta;
-  }
-
   private attachListeners() {
     this.canvas.addEventListener("mousedown", this.handleMouseDown);
     this.canvas.addEventListener("mousemove", this.handleMouseMove);
     this.canvas.addEventListener("mouseup", this.handleMouseUp);
     this.canvas.addEventListener("wheel", this.handleWheel, { passive: false });
     this.canvas.addEventListener("contextmenu", this.handleContextMenu);
-    document.addEventListener("keydown", this.handleKeyDown);
-    document.addEventListener("keyup", this.handleKeyUp);
+    this.keys.attach(this.canvas);
   }
 
   private detachListeners() {
@@ -255,8 +205,7 @@ export class DeviceInputHandler {
     this.canvas.removeEventListener("mouseup", this.handleMouseUp);
     this.canvas.removeEventListener("wheel", this.handleWheel);
     this.canvas.removeEventListener("contextmenu", this.handleContextMenu);
-    document.removeEventListener("keydown", this.handleKeyDown);
-    document.removeEventListener("keyup", this.handleKeyUp);
+    this.keys.detach();
   }
 
   sendWake() {

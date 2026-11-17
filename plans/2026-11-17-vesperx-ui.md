@@ -174,7 +174,7 @@ a separate task.
 
 - **Files:** `web/src/app/fonts/archivo.woff2` (Archivo, variable, weights 100–900)
   and `web/src/app/fonts/jetbrains-mono.woff2` (JetBrains Mono, variable, weights
-  100–800). Both are copied from SunSet's `docs/design/fonts/`.
+  400–800; checked with fontTools). Both are copied from SunSet's `docs/design/fonts/`.
 - **Licences:** each font's `*-OFL.txt` licence text (with its copyright line) sits
   beside it, plus a `README.md` with the source and the SHA-256 of each file. The SIL
   Open Font License 1.1 allows bundling and redistribution, provided the copyright and

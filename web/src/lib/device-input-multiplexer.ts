@@ -1,4 +1,4 @@
-import { keycodeMap } from "./device-keymap";
+import { CanvasKeys } from "./canvas-keys";
 import { getToken } from "./auth";
 import { WheelGestures } from "./wheel-gesture";
 import { NavAction, navMessages } from "./device-nav";
@@ -129,6 +129,9 @@ export class MultiplexerInputHandler {
   }
 
   private handleMouseDown = (e: MouseEvent) => {
+    // preventDefault below stops the browser focusing the screen, so do it here:
+    // a press on the screen means typing goes to the phones.
+    this.canvas?.focus();
     if (e.button !== 0) return;
     e.preventDefault();
     const { x, y } = this.getNormalizedCoords(e);
@@ -176,54 +179,14 @@ export class MultiplexerInputHandler {
     this.wheelGestures.wheel(e, this.getNormalizedCoords(e), this.canvas.getBoundingClientRect());
   };
 
-  private handleKeyDown = (e: KeyboardEvent) => {
-    e.preventDefault();
-
-    const keycode = keycodeMap[e.code];
-    if (keycode !== undefined) {
-      this.broadcast({
-        type: "key",
-        action: 0,
-        keycode,
-        repeat: e.repeat ? 1 : 0,
-        metastate: this.getMetastate(e),
-      });
-      return;
-    }
-
-    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-      this.broadcast({ type: "text", text: e.key });
-    }
-  };
-
-  private handleKeyUp = (e: KeyboardEvent) => {
-    e.preventDefault();
-
-    const keycode = keycodeMap[e.code];
-    if (keycode !== undefined) {
-      this.broadcast({
-        type: "key",
-        action: 1,
-        keycode,
-        repeat: 0,
-        metastate: this.getMetastate(e),
-      });
-    }
-  };
+  // No clipboard here: Ctrl+C and Ctrl+V go to every phone as keys.
+  private keys = new CanvasKeys({ send: (msg) => this.broadcast(msg) });
 
   // Right-click is Back, as in scrcpy.
   private handleContextMenu = (e: Event) => {
     e.preventDefault();
     this.nav("back");
   };
-
-  private getMetastate(e: KeyboardEvent): number {
-    let meta = 0;
-    if (e.shiftKey) meta |= 1;
-    if (e.altKey) meta |= 2;
-    if (e.ctrlKey) meta |= 0x1000;
-    return meta;
-  }
 
   private attachListeners() {
     if (!this.canvas) return;
@@ -232,8 +195,7 @@ export class MultiplexerInputHandler {
     this.canvas.addEventListener("mouseup", this.handleMouseUp);
     this.canvas.addEventListener("wheel", this.handleWheel, { passive: false });
     this.canvas.addEventListener("contextmenu", this.handleContextMenu);
-    document.addEventListener("keydown", this.handleKeyDown);
-    document.addEventListener("keyup", this.handleKeyUp);
+    this.keys.attach(this.canvas);
   }
 
   private detachListeners() {
@@ -244,8 +206,7 @@ export class MultiplexerInputHandler {
     this.canvas.removeEventListener("mouseup", this.handleMouseUp);
     this.canvas.removeEventListener("wheel", this.handleWheel);
     this.canvas.removeEventListener("contextmenu", this.handleContextMenu);
-    document.removeEventListener("keydown", this.handleKeyDown);
-    document.removeEventListener("keyup", this.handleKeyUp);
+    this.keys.detach();
   }
 
   /** Press an on-screen navigation button on every device. */
