@@ -1,7 +1,7 @@
 # Plan: VesperX visual overhaul of the web UI
 
 **Date:** 2026-11-17 · **Branch:** `feature/vesperx-ui` (worktree, from `main` @ e7917ec)
-**Status:** reviewed and approved by Codex (4 rounds, see Review). Building.
+**Status:** built and verified in the browser (see Deviations and Verification). Code review pending.
 
 ## What
 
@@ -163,9 +163,9 @@ a separate task.
 | Stop session | viewer | "Stop the session on {name}? {n} people are watching; it ends for all of them. The phone keeps running." → **Stop for everyone** | error toast, session state unchanged |
 | Stop all | dashboard, group | "Stop {n} sessions?" with the list | per-device result toast |
 | Delete device | card menu, edit | "Remove {name} from Batter? The phone is not touched; it can be registered again." → **Remove** | error toast |
-| Revoke access | groups, teams | "Revoke {who}'s access to {what}? Their open sessions end now." → **Revoke** | error toast |
+| Revoke access | groups, teams | "Revoke {who}'s access to {what}?" plus what actually happens: they can't open it through this grant any more, and other access is unaffected. **Built differently:** the backend doesn't end open sessions, so the dialog doesn't claim it does. → **Revoke** | error in the dialog |
 | Change role | users | "Make {user} an {role}?" plus what that role can do → **Make {role}** | error in the dialog |
-| Disable user | users | "Disable {user}? They are signed out and can't sign in until re-enabled." → **Disable** | error in the dialog |
+| Disable user | users | "Disable {user}?" They can't sign in until re-enabled, and a sign-in already open ends when its token expires. **Built differently:** the backend doesn't sign them out. → **Disable** | error in the dialog |
 | VPN off | device, VPN | "Turn off the VPN for {name}? Its traffic is blocked by the kill switch until a profile is set." (the exact wording follows what the backend does) → **Turn off** | error toast |
 | Ethernet port apply | phone network | "Apply port {port} to {name}? The phone's network restarts." → **Apply** | error in the dialog |
 | Broadcast nav or "Send to all" | multiplexer | "Send {action} to {n} phones?" (only when n > 1) → **Send to {n}** | per-phone toast |
@@ -385,3 +385,44 @@ allowlisted handler messages are shown." No new HIGH or MED issues.
 **Consensus:** reached on 2026-11-17, with Codex approving the plan as written.
 Presented to the founder, who had already chosen this direction ("Okay try the
 vesperx"); the build starts from this version.
+
+## Deviations (found while building)
+
+- **Role gating is partial.** Per-device permission (view, control, manage) isn't in
+  the device list. So the UI hides only what a global role rules out:
+  - operator-only: register, reconnect, screen lock and Ethernet;
+  - admin-only: the admin pages and group management.
+
+  Stop, Wake, Install, Edit and Delete stay visible. A denial shows "No access to this
+  device." from the allowlist. Watch only comes from the control socket.
+- **Watch only needed a client probe.** The control socket is refused with a 403
+  before the upgrade, which a browser can't see. So a user without control saw
+  "Reconnecting" forever, before this change as well. `control-probe.ts` asks once over
+  plain HTTP. It is web-only and tested; details are in the progress notes.
+- **Shift+Esc leaves the phone's screen.** This was added in integration. Tab is sent
+  to the phone, so without it a keyboard user couldn't leave.
+- **The viewer no longer takes focus on load.** Keys reach the phone after a click or
+  a Tab onto its screen. This is in the changelog.
+- **The admin's own row can't change its own role.** This is UI only; the backend
+  still allows it (see Follow-ups in the progress notes).
+- **Confirmation wording follows the backend:**
+  - revoke doesn't end sessions;
+  - disabling a user doesn't sign them out;
+  - deleting a VPN profile cuts its phones' internet (the kill switch).
+- **Agent ownership.** The edit modal and the wizard went to agent A instead of D, to
+  balance the work. They open from the dashboard.
+- **Mono labels are 11px.** The plan said "12px or larger". Body text is 12px and up.
+  Uppercase mono labels are 11px, as in the brand and the mockup. The guard forbids
+  anything under 11px.
+
+## Verification (done 2026-11-17)
+
+Details and the rig are in `plans/progress/2026-11-17-vesperx-ui.md`.
+- **Tests:** `npm test` 119/119, including the full palette scan; `tsc` and
+  `next build` are clean. Every new test was mutation-checked.
+- **Browser walk:** three passes against the production build, with the real
+  backend and fakeadb, at 1440 and 390 wide: 51 checks, 50 passed. The one failure
+  was a script error (a disabled button). There was no sideways scroll, and no request
+  left the app's origin.
+- **Not shown:** live video in the new layout. fakeadb's frames aren't real H.264, and
+  no real phone was used.
