@@ -136,8 +136,18 @@ export default function PhoneNetworkPage() {
                 </span>
               )}
             </div>
-            {status.error && <Banner tone="danger">{status.error}</Banner>}
-            {status.unavailable && <Banner tone="danger">{status.unavailable}</Banner>}
+            {/* error and unavailable can be raw system errors, which the server logs.
+                Only "missing" is a fixed sentence written for display. */}
+            {status.error && (
+              <Banner tone="danger">
+                {status.state === 'missing'
+                  ? status.error
+                  : 'The phone network port couldn\u2019t be set up. The reason is in the server log.'}
+              </Banner>
+            )}
+            {status.unavailable && (
+              <Banner tone="danger">Batter can&rsquo;t see the box&rsquo;s network ports. The reason is in the server log.</Banner>
+            )}
             {status.warning && <Banner tone="warn">{status.warning}</Banner>}
           </section>
         )}

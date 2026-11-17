@@ -323,7 +323,10 @@ export default function AdminVPNPage() {
 
               {p.apply_error && (
                 <div className="border-b border-vx-hairline px-4 py-3">
-                  <Banner tone="warn">Saved, but not fully applied: {p.apply_error}</Banner>
+                  {/* apply_error is a raw command error; the server logs it. */}
+                  <Banner tone="warn">
+                    Saved, but not applied: the kill switch or tunnel didn&rsquo;t come up, so its phones have no internet. The reason is in the server log.
+                  </Banner>
                 </div>
               )}
 
