@@ -2,19 +2,33 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
+import { LoaderCircle, MonitorOff, Play, RotateCw, Square, TriangleAlert } from 'lucide-react';
 import { DeviceViewer } from '@/components/device/device-viewer';
 import { EthernetPanel } from '@/components/device/ethernet-panel';
+import { BackButton } from '@/components/viewer/back-button';
+import { ViewerHeader } from '@/components/viewer/viewer-header';
+import type { ViewerLive } from '@/components/viewer/viewer-status';
+import { Button, ConfirmDialog, EmptyState, useToast } from '@/components/ui';
 import { getDevice, startSession, stopSession, upgradeSession, downgradeSession, DeviceInfo } from '@/lib/api';
-import { getToken, isOperator } from '@/lib/auth';
+import { errorMessage } from '@/lib/api-error';
+import { getToken } from '@/lib/auth';
+import { displayName } from '@/lib/dashboard-filter';
 import { networkState } from '@/lib/device-network';
+import { useUser } from '@/lib/use-user';
 import { QUALITY_LEVELS, storedQuality, storeQuality, upgradeAtStoredQuality, type VideoQuality } from '@/lib/video-quality';
+
+/** How long starting a session may take before the page offers Retry. */
+const SLOW_START_MS = 15_000;
 
 export default function DeviceDetailPage() {
   const router = useRouter();
   const params = useParams();
+  const toast = useToast();
+  const { isOperator } = useUser();
   const serial = decodeURIComponent(params.serial as string);
   const [device, setDevice] = useState<DeviceInfo | null>(null);
   const [loading, setLoading] = useState(true);
+  const [slow, setSlow] = useState(false);
   const [error, setError] = useState('');
   const [quality, setQuality] = useState<VideoQuality>('medium');
   const [changingQuality, setChangingQuality] = useState(false);
@@ -22,6 +36,8 @@ export default function DeviceDetailPage() {
   // the steps stay up until it's back, then the session starts.
   const [reconnecting, setReconnecting] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [live, setLive] = useState<ViewerLive | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
 
   useEffect(() => {
     if (!getToken()) {
@@ -52,7 +68,7 @@ export default function DeviceDetailPage() {
         const updated = await getDevice(serial);
         setDevice(updated);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load device');
+        setError(errorMessage(err, 'start the session'));
       } finally {
         setLoading(false);
       }
@@ -66,6 +82,16 @@ export default function DeviceDetailPage() {
     };
   }, [serial, attempt]);
 
+  // Starting the session is taking long: offer Retry rather than a spinner for ever.
+  useEffect(() => {
+    if (!loading) {
+      setSlow(false);
+      return;
+    }
+    const t = setTimeout(() => setSlow(true), SLOW_START_MS);
+    return () => clearTimeout(t);
+  }, [loading, attempt]);
+
   const reconnected = useCallback(() => {
     setReconnecting(false);
     setAttempt((a) => a + 1);
@@ -74,13 +100,15 @@ export default function DeviceDetailPage() {
   useEffect(() => setQuality(storedQuality()), []);
 
   // The session is shared, so someone else may change its level; keep the
-  // shown level current.
+  // shown level current. A background poll stays quiet when it fails.
   useEffect(() => {
     const t = setInterval(() => {
       getDevice(serial).then(setDevice).catch(() => {});
     }, 5000);
     return () => clearInterval(t);
   }, [serial]);
+
+  const name = device ? displayName(device) : serial;
 
   const handleQuality = async (q: VideoQuality) => {
     setQuality(q);
@@ -89,8 +117,8 @@ export default function DeviceDetailPage() {
     try {
       await upgradeSession(serial, { quality: q, change: true });
       setDevice(await getDevice(serial));
-    } catch {
-      // The viewer reconnects on its own; the shown level updates on poll.
+    } catch (err) {
+      toast.error(errorMessage(err, 'change the quality'));
     } finally {
       setChangingQuality(false);
     }
@@ -103,91 +131,148 @@ export default function DeviceDetailPage() {
   // the server if the session is still alive.
   const ensureSession = useCallback(() => startSession(serial), [serial]);
 
+  // A failure shows as a toast and leaves the session as it was.
   const handleStop = async () => {
     try {
       await stopSession(serial);
-      router.push('/dashboard');
-    } catch {
-      // ignore
+    } catch (err) {
+      toast.error(errorMessage(err, 'stop the session'));
+      return;
     }
+    toast.success(`Session on ${name} stopped`);
+    router.push('/dashboard');
   };
 
-  return (
-    <div className="flex flex-col h-full overflow-hidden">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800 bg-gray-900">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => router.push('/dashboard')}
-              className="text-sm text-gray-400 hover:text-gray-200"
-            >
-              &larr; Back
-            </button>
-            <span className="text-sm font-medium text-white">
-              {device?.model || serial}
-            </span>
-            <span className="text-[10px] text-gray-500">{serial}</span>
-          </div>
-          <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 text-[10px] text-gray-400">
-            Quality
-            <select
-              value={quality}
-              onChange={(e) => handleQuality(e.target.value as VideoQuality)}
-              disabled={changingQuality}
-              className="px-2 py-1 text-[10px] bg-gray-800 border border-gray-700 rounded text-gray-200 disabled:opacity-50"
-            >
-              {QUALITY_LEVELS.map((l) => (
-                <option key={l.value} value={l.value}>{l.label}</option>
-              ))}
-            </select>
-          </label>
-          {sessionQuality && sessionQuality !== quality && !changingQuality && (
-            <span className="text-[10px] text-yellow-400" title="The session is shared; the latest choice applies to everyone watching.">
-              Now {sessionQuality} (changed by another viewer)
-            </span>
-          )}
-          <button
-            onClick={handleStop}
-            className="px-3 py-2 text-xs bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-lg"
-          >
-            Stop Session
-          </button>
-          </div>
-        </div>
+  const showViewer = !reconnecting && !loading && !error && !!device?.has_session;
 
-        {/* Viewer */}
-        <div className="flex-1 overflow-hidden">
-          {reconnecting && device ? (
-            <div className="flex items-center justify-center h-full p-4">
-              <div className="w-full max-w-md rounded-lg bg-gray-900 border border-gray-800 p-4 space-y-3">
-                <h3 className="text-sm font-semibold text-white">This phone restarted</h3>
-                {isOperator() ? (
-                  <EthernetPanel serial={serial} device={device} onDone={reconnected} />
-                ) : (
-                  <p className="text-xs text-gray-300">
-                    A restart turns adb over the network off, so Batter can&apos;t show or control the phone until it
-                    is plugged into USB once. Ask an operator to reconnect it.
-                  </p>
-                )}
-              </div>
+  const headerActions = showViewer && (
+    <>
+      <label className="flex items-center gap-2">
+        <span className="vx-label">Quality</span>
+        <select
+          value={quality}
+          onChange={(e) => handleQuality(e.target.value as VideoQuality)}
+          disabled={changingQuality}
+          className="vx-input !h-9 !w-auto !px-2.5 !text-[13px] disabled:opacity-50"
+        >
+          {QUALITY_LEVELS.map((l) => (
+            <option key={l.value} value={l.value}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {sessionQuality && sessionQuality !== quality && !changingQuality && (
+        <span
+          className="font-mono text-[11px] uppercase tracking-wide text-vx-warn"
+          title="The session is shared; the latest choice applies to everyone watching."
+        >
+          Now {sessionQuality}, changed by another viewer
+        </span>
+      )}
+      <Button variant="danger" icon={<Square size={14} />} onClick={() => setConfirmStop(true)}>
+        Stop session
+      </Button>
+    </>
+  );
+
+  return (
+    <div className="flex h-full flex-col overflow-y-auto">
+      <ViewerHeader name={name} serial={serial} live={showViewer ? (live ?? undefined) : undefined}>
+        {headerActions}
+      </ViewerHeader>
+
+      {reconnecting && device ? (
+        <div className="flex flex-1 items-center justify-center p-4">
+          <section className="vx-panel w-full max-w-md space-y-4 p-5" aria-labelledby="restarted-title">
+            <div className="flex items-center gap-2 text-vx-warn">
+              <TriangleAlert size={16} aria-hidden />
+              <h2 id="restarted-title" className="text-lg text-vx-fg">
+                This phone restarted
+              </h2>
             </div>
-          ) : loading ? (
-            <div className="flex items-center justify-center h-full text-gray-500 text-sm">
-              Starting session...
-            </div>
-          ) : error ? (
-            <div className="flex items-center justify-center h-full text-red-400 text-sm">
-              {error}
-            </div>
-          ) : device?.has_session ? (
-            <DeviceViewer serial={serial} onStreamLost={ensureSession} />
+            {isOperator ? (
+              <EthernetPanel serial={serial} device={device} onDone={reconnected} />
+            ) : (
+              <p className="text-sm text-vx-fg-muted">
+                A restart turns adb over the network off, so Batter can&apos;t show or control the phone until it is
+                plugged into USB once. Ask an operator to reconnect it.
+              </p>
+            )}
+            <BackButton />
+          </section>
+        </div>
+      ) : loading ? (
+        <div className="flex flex-1 items-center justify-center p-4" role="status">
+          {slow ? (
+            <EmptyState
+              icon={<LoaderCircle className="animate-spin" />}
+              title="Still starting…"
+              action={
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button variant="primary" size="lg" icon={<RotateCw size={16} />} onClick={() => setAttempt((a) => a + 1)}>
+                    Retry
+                  </Button>
+                  <BackButton />
+                </div>
+              }
+            >
+              Starting the session on {name} is taking longer than usual. The phone may be busy. You can wait, retry, or
+              go back.
+            </EmptyState>
           ) : (
-            <div className="flex items-center justify-center h-full text-gray-500 text-sm">
-              No active session
-            </div>
+            <p className="inline-flex items-center gap-2 text-sm text-vx-fg-muted">
+              <LoaderCircle size={16} className="animate-spin text-vx-accent" aria-hidden />
+              Starting session…
+            </p>
           )}
         </div>
+      ) : error ? (
+        <div className="flex flex-1 items-center justify-center p-4">
+          <EmptyState
+            icon={<TriangleAlert />}
+            title="Couldn't open this phone"
+            action={
+              <div className="flex flex-wrap justify-center gap-2">
+                <Button variant="primary" size="lg" icon={<RotateCw size={16} />} onClick={() => setAttempt((a) => a + 1)}>
+                  Retry
+                </Button>
+                <BackButton />
+              </div>
+            }
+          >
+            {error}
+          </EmptyState>
+        </div>
+      ) : device?.has_session ? (
+        <DeviceViewer serial={serial} onStreamLost={ensureSession} onLiveChange={setLive} />
+      ) : (
+        <div className="flex flex-1 items-center justify-center p-4">
+          <EmptyState
+            icon={<MonitorOff />}
+            title="No session running"
+            action={
+              <div className="flex flex-wrap justify-center gap-2">
+                <Button variant="primary" size="lg" icon={<Play size={16} />} onClick={() => setAttempt((a) => a + 1)}>
+                  Start session
+                </Button>
+                <BackButton />
+              </div>
+            }
+          >
+            There is no live session on {name}. It may have been stopped. Start one to watch and control the phone.
+          </EmptyState>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={confirmStop}
+        onClose={() => setConfirmStop(false)}
+        title={`Stop the session on ${name}?`}
+        consequence="It ends for everyone watching this phone. The phone keeps running."
+        confirmLabel="Stop for everyone"
+        onConfirm={handleStop}
+      />
     </div>
   );
 }

@@ -1,14 +1,15 @@
 'use client';
 
-import { useRef, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useRef, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Move } from 'lucide-react';
 import type { SwipeDirection } from '@/lib/swipe-pad';
 import { clampPadPos, type PadPos } from '@/lib/viewer-prefs';
 
-const ARROWS: { dir: SwipeDirection; label: string; cell: string; points: string }[] = [
-  { dir: 'up', label: 'Swipe up', cell: 'col-start-2 row-start-1', points: '6,15 12,9 18,15' },
-  { dir: 'left', label: 'Swipe left', cell: 'col-start-1 row-start-2', points: '15,6 9,12 15,18' },
-  { dir: 'right', label: 'Swipe right', cell: 'col-start-3 row-start-2', points: '9,6 15,12 9,18' },
-  { dir: 'down', label: 'Swipe down', cell: 'col-start-2 row-start-3', points: '6,9 12,15 18,9' },
+const ARROWS: { dir: SwipeDirection; label: string; cell: string; icon: ReactNode }[] = [
+  { dir: 'up', label: 'Swipe up', cell: 'col-start-2 row-start-1', icon: <ArrowUp size={18} /> },
+  { dir: 'left', label: 'Swipe left', cell: 'col-start-1 row-start-2', icon: <ArrowLeft size={18} /> },
+  { dir: 'right', label: 'Swipe right', cell: 'col-start-3 row-start-2', icon: <ArrowRight size={18} /> },
+  { dir: 'down', label: 'Swipe down', cell: 'col-start-2 row-start-3', icon: <ArrowDown size={18} /> },
 ];
 
 interface SwipePadProps {
@@ -20,13 +21,15 @@ interface SwipePadProps {
   onMoved: (pos: PadPos) => void;
   onSwipe: (dir: SwipeDirection) => void;
   disabled?: boolean;
+  /** Why the arrows are disabled; shown as their title. */
+  disabledReason?: string;
 }
 
 /**
  * A floating pad of swipe arrows over the phone view. Drag it by its
  * middle; each arrow swipes a finger across the phone's screen that way.
  */
-export function SwipePad({ boundsRef, pos, onMove, onMoved, onSwipe, disabled }: SwipePadProps) {
+export function SwipePad({ boundsRef, pos, onMove, onMoved, onSwipe, disabled, disabledReason }: SwipePadProps) {
   const padRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ dx: number; dy: number; last: PadPos } | null>(null);
 
@@ -73,10 +76,19 @@ export function SwipePad({ boundsRef, pos, onMove, onMoved, onSwipe, disabled }:
   return (
     <div
       ref={padRef}
-      className="absolute z-20 grid grid-cols-3 grid-rows-3 gap-0.5 p-1 rounded-xl bg-gray-900/80 border border-gray-700 shadow-lg backdrop-blur-sm select-none"
+      role="group"
+      aria-label="Swipe pad"
+      className="absolute z-20 grid select-none grid-cols-3 grid-rows-3 gap-px overflow-hidden rounded-md border border-vx-control bg-vx-hairline"
       style={{ left: `${pos.x * 100}%`, top: `${pos.y * 100}%`, transform: 'translate(-50%, -50%)' }}
     >
-      {ARROWS.map(({ dir, label, cell, points }) => (
+      {[0, 1, 2, 3].map((i) => (
+        <span
+          key={i}
+          aria-hidden
+          className={`bg-vx-surface ${['col-start-1 row-start-1', 'col-start-3 row-start-1', 'col-start-1 row-start-3', 'col-start-3 row-start-3'][i]}`}
+        />
+      ))}
+      {ARROWS.map(({ dir, label, cell, icon }) => (
         <button
           key={dir}
           type="button"
@@ -84,13 +96,11 @@ export function SwipePad({ boundsRef, pos, onMove, onMoved, onSwipe, disabled }:
           // Keep keyboard focus on the device screen so typing still goes to it.
           onMouseDown={(e) => e.preventDefault()}
           disabled={disabled}
-          title={label}
+          title={disabled && disabledReason ? disabledReason : label}
           aria-label={label}
-          className={`${cell} flex items-center justify-center w-11 h-11 rounded-lg text-gray-300 hover:text-white hover:bg-gray-700 disabled:opacity-40 disabled:hover:bg-transparent`}
+          className={`${cell} flex h-11 w-11 items-center justify-center bg-vx-surface text-vx-fg-muted transition-colors hover:bg-vx-elevated hover:text-vx-fg disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-vx-surface disabled:hover:text-vx-fg-muted focus-visible:[outline-offset:-2px]`}
         >
-          <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points={points} />
-          </svg>
+          {icon}
         </button>
       ))}
       <div
@@ -98,13 +108,12 @@ export function SwipePad({ boundsRef, pos, onMove, onMoved, onSwipe, disabled }:
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
+        onMouseDown={(e) => e.preventDefault()}
         title="Drag to move"
         aria-label="Move the swipe pad"
-        className="col-start-2 row-start-2 flex items-center justify-center w-11 h-11 rounded-lg text-gray-500 hover:text-gray-300 cursor-grab active:cursor-grabbing touch-none"
+        className="col-start-2 row-start-2 flex h-11 w-11 cursor-grab touch-none items-center justify-center bg-vx-surface text-vx-fg-label hover:text-vx-fg active:cursor-grabbing"
       >
-        <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
-          {[8, 12, 16].flatMap((y) => [9, 15].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1.5" />))}
-        </svg>
+        <Move size={16} />
       </div>
     </div>
   );

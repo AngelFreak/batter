@@ -1,30 +1,46 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { LoaderCircle, Move, Home, PackagePlus, Power, RotateCw, Smartphone } from 'lucide-react';
 import { DeviceVideoPlayer } from '@/lib/device-video';
 import { DeviceInputHandler } from '@/lib/device-input';
 import { DeviceAudioPlayer } from '@/lib/device-audio';
 import { AudioControls, type AudioView } from '@/lib/audio-controls';
 import { fetchScreenshot, pushFile, installAPK } from '@/lib/api';
+import { errorMessage } from '@/lib/api-error';
 import { useNoSwipeNavigation } from '@/lib/use-no-swipe-navigation';
+import { Button, StatusChip, useToast, type MenuItem } from '@/components/ui';
 import { NavBar } from './nav-bar';
 import { SwipePad } from './swipe-pad';
+import { BackButton } from '@/components/viewer/back-button';
+import { ViewerToolbar } from '@/components/viewer/viewer-toolbar';
+import { ClipboardPanel, TextBar } from '@/components/viewer/viewer-panels';
+import { isVideoFailure, videoView, type ViewerLive } from '@/components/viewer/viewer-status';
 import { DEFAULT_VIEWER_PREFS, loadViewerPrefs, saveViewerPrefs, type ViewerPrefs } from '@/lib/viewer-prefs';
+
+/** How long the video may take to start before the viewer offers Retry. */
+const SLOW_START_MS = 15_000;
 
 interface DeviceViewerProps {
   serial: string;
   /** Awaited before each video reconnect, e.g. to restart a lost session. */
   onStreamLost?: () => Promise<unknown>;
+  /** Tells the page header how the stream is doing; null when the viewer goes away. */
+  onLiveChange?: (live: ViewerLive | null) => void;
 }
 
-export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
+export function DeviceViewer({ serial, onStreamLost, onLiveChange }: DeviceViewerProps) {
   useNoSwipeNavigation();
+  const toast = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<DeviceVideoPlayer | null>(null);
   const inputRef = useRef<DeviceInputHandler | null>(null);
   const audioRef = useRef<AudioControls | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const hadFrame = useRef(false);
   const [videoStatus, setVideoStatus] = useState('connecting');
   const [controlStatus, setControlStatus] = useState('connecting');
   const [fps, setFps] = useState(0);
@@ -32,10 +48,12 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
   const [showFrame, setShowFrame] = useState(true);
   const [showTextInput, setShowTextInput] = useState(false);
   const [textValue, setTextValue] = useState('');
-  const [toast, setToast] = useState<string | null>(null);
   const [clipboardText, setClipboardText] = useState('');
   const [dragging, setDragging] = useState(false);
   const [showClipboard, setShowClipboard] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [slow, setSlow] = useState(false);
+  const [transfer, setTransfer] = useState<string | null>(null);
   const [audio, setAudio] = useState<AudioView>({ state: 'connecting', muted: true, volume: 1 });
   // Nav buttons and the swipe pad: this browser's choice, read after mount
   // (localStorage isn't there during server rendering).
@@ -51,11 +69,35 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
   // Read through a ref so a new callback identity doesn't recreate the player.
   const onStreamLostRef = useRef(onStreamLost);
   onStreamLostRef.current = onStreamLost;
+  const onLiveChangeRef = useRef(onLiveChange);
+  onLiveChangeRef.current = onLiveChange;
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 2000);
-  }, []);
+  const controlOk = controlStatus === 'connected';
+  const controlReason =
+    controlStatus === 'denied' ? "Your access doesn't include control" : 'Control is not connected yet';
+  const keysToPhone = focused && controlOk;
+
+  // Header: report what the stream is doing, and clear it when we go away.
+  useEffect(() => {
+    onLiveChangeRef.current?.({ video: videoStatus, control: controlStatus, fps, keysToPhone });
+  }, [videoStatus, controlStatus, fps, keysToPhone]);
+  useEffect(() => () => onLiveChangeRef.current?.(null), []);
+
+  // Keep the last frame: once video has played, a drop is "reconnecting", not a blank start.
+  useEffect(() => {
+    if (videoStatus === 'streaming') hadFrame.current = true;
+  }, [videoStatus]);
+
+  // No video after a while: say so and offer Retry instead of an endless spinner.
+  const waiting = videoStatus === 'connecting' || videoStatus === 'connected';
+  useEffect(() => {
+    if (!waiting || hadFrame.current) {
+      setSlow(false);
+      return;
+    }
+    const t = setTimeout(() => setSlow(true), SLOW_START_MS);
+    return () => clearTimeout(t);
+  }, [waiting]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -76,7 +118,7 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
     input.setOnStatusChange(setControlStatus);
     input.setOnClipboardReceive((text) => {
       setClipboardText(text);
-      showToast('Clipboard copied to host');
+      toastRef.current.success('Phone clipboard copied here and to your computer');
     });
     input.connect(serial);
 
@@ -85,11 +127,15 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
     audioRef.current = audioControls;
     audioControls.start(serial);
 
-    // Make canvas focusable for keyboard events
-    canvas.tabIndex = 0;
-    canvas.focus();
+    // Keys reach the phone only while the screen has focus; the header says so.
+    const onFocus = () => setFocused(true);
+    const onBlur = () => setFocused(false);
+    canvas.addEventListener('focus', onFocus);
+    canvas.addEventListener('blur', onBlur);
 
     return () => {
+      canvas.removeEventListener('focus', onFocus);
+      canvas.removeEventListener('blur', onBlur);
       player.disconnect();
       input.disconnect();
       audioControls.stop();
@@ -97,23 +143,52 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
       inputRef.current = null;
       audioRef.current = null;
     };
-  }, [serial, showToast]);
+  }, [serial]);
+
+  const retry = useCallback(async () => {
+    setSlow(false);
+    try {
+      await onStreamLostRef.current?.();
+    } catch {
+      // The reconnect below shows its own status if the session is still gone.
+    }
+    const player = playerRef.current;
+    if (!player) return;
+    player.disconnect();
+    player.connect(serial);
+  }, [serial]);
 
   const handleScreenshot = async () => {
     setCapturing(true);
     try {
       const blob = await fetchScreenshot(serial);
-      if (blob) {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${serial}-${Date.now()}.png`;
-        a.click();
-        URL.revokeObjectURL(url);
+      if (!blob) {
+        toast.error("Couldn't take a screenshot. Try again.");
+        return;
       }
+      const filename = `${serial}-${Date.now()}.png`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(`Screenshot saved as ${filename}`);
+    } catch (err) {
+      toast.error(errorMessage(err, 'take a screenshot'));
     } finally {
       setCapturing(false);
     }
+  };
+
+  const handleWake = () => {
+    inputRef.current?.sendWake();
+    toast.success('Wake sent');
+  };
+
+  const handleScreenOff = () => {
+    inputRef.current?.sendScreenOff();
+    toast.success('Screen off sent');
   };
 
   const handleTextSend = useCallback(() => {
@@ -123,49 +198,59 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
     }
   }, [textValue]);
 
-  const handleTextKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') {
-      handleTextSend();
-    }
-  }, [handleTextSend]);
-
-  const handlePaste = useCallback(async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text) {
-        inputRef.current?.sendSetClipboard(text, true);
-        showToast('Pasted to device');
+  // Paste to phone: the text in the panel, or your own clipboard if it is empty.
+  const handlePasteToPhone = useCallback(async () => {
+    let text = clipboardText;
+    if (!text) {
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        toast.error("Couldn't read your clipboard. Allow clipboard access for this page, or type the text here.");
+        return;
       }
-    } catch {
-      showToast('Clipboard access denied');
+      if (!text) {
+        toast.info('Nothing to paste. Your clipboard is empty.');
+        return;
+      }
+      setClipboardText(text);
     }
-  }, [showToast]);
+    inputRef.current?.sendSetClipboard(text, true);
+    toast.success('Pasted to the phone');
+  }, [clipboardText, toast]);
 
-  const handleCopy = useCallback(() => {
+  const handleCopyFromPhone = useCallback(() => {
     inputRef.current?.sendGetClipboard();
   }, []);
 
   // File drop handlers
-  const handleFileDrop = useCallback(async (files: FileList) => {
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const isAPK = file.name.toLowerCase().endsWith('.apk');
-      try {
-        if (isAPK) {
-          showToast(`Installing ${file.name}...`);
-          await installAPK(serial, file);
-          showToast(`Installed ${file.name}`);
-        } else {
-          showToast(`Pushing ${file.name}...`);
-          await pushFile(serial, file);
-          showToast(`Pushed ${file.name}`);
-        }
-      } catch (err) {
-        showToast(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+  const handleFileDrop = useCallback(
+    async (files: FileList) => {
+      if (!controlOk) {
+        toast.error(`${controlReason}, so files can't be sent yet.`);
+        return;
       }
-    }
-  }, [serial, showToast]);
+      const list = Array.from(files);
+      for (let i = 0; i < list.length; i++) {
+        const file = list[i];
+        const isAPK = file.name.toLowerCase().endsWith('.apk');
+        const count = list.length > 1 ? ` (${i + 1} of ${list.length})` : '';
+        setTransfer(`${isAPK ? 'Installing' : 'Pushing'} ${file.name}${count}`);
+        try {
+          if (isAPK) {
+            await installAPK(serial, file);
+            toast.success(`Installed ${file.name}`);
+          } else {
+            await pushFile(serial, file);
+            toast.success(`Pushed ${file.name} to the phone`);
+          }
+        } catch (err) {
+          toast.error(errorMessage(err, `${isAPK ? 'install' : 'push'} ${file.name}`));
+        }
+      }
+      setTransfer(null);
+    },
+    [serial, toast, controlOk, controlReason],
+  );
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -179,196 +264,215 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
     setDragging(false);
   }, []);
 
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragging(false);
-    if (e.dataTransfer.files.length > 0) {
-      handleFileDrop(e.dataTransfer.files);
-    }
-  }, [handleFileDrop]);
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDragging(false);
+      if (e.dataTransfer.files.length > 0) {
+        handleFileDrop(e.dataTransfer.files);
+      }
+    },
+    [handleFileDrop],
+  );
 
-  const handleInstallAPKClick = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
-
-  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      handleFileDrop(e.target.files);
-      e.target.value = '';
-    }
-  }, [handleFileDrop]);
+  const handleFileInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files.length > 0) {
+        handleFileDrop(e.target.files);
+        e.target.value = '';
+      }
+    },
+    [handleFileDrop],
+  );
 
   // "blocked" means the browser wants a click first, which the button is.
   const audioUsable = audio.state === 'available' || audio.state === 'blocked';
   const audioTitle =
-    audio.state === 'unavailable' ? `Audio unavailable${audio.reason ? `: ${audio.reason}` : ''}` :
-    audio.state === 'unsupported' ? 'This browser cannot play device audio' :
-    audio.state === 'needs-https' ? 'Device audio needs HTTPS' :
-    audio.state === 'blocked' ? 'Click to allow sound' :
-    audioUsable ? (audio.muted ? 'Unmute device audio' : 'Mute device audio') :
-    'Connecting audio...';
+    audio.state === 'unavailable'
+      ? `Audio unavailable${audio.reason ? `: ${audio.reason}` : ''}`
+      : audio.state === 'unsupported'
+        ? 'This browser cannot play device audio'
+        : audio.state === 'needs-https'
+          ? 'Device audio needs HTTPS'
+          : audio.state === 'blocked'
+            ? 'Click to allow sound'
+            : audioUsable
+              ? audio.muted
+                ? 'Unmute device audio'
+                : 'Mute device audio'
+              : 'Connecting audio…';
 
-  const statusColor = videoStatus === 'streaming' ? 'text-green-400' : 'text-yellow-400';
+  const moreItems: (MenuItem | 'separator')[] = [
+    {
+      label: 'Install APK',
+      icon: <PackagePlus />,
+      onSelect: () => fileInputRef.current?.click(),
+      disabled: !controlOk,
+      disabledReason: controlReason,
+    },
+    {
+      label: 'Screen off',
+      icon: <Power />,
+      onSelect: handleScreenOff,
+      disabled: !controlOk,
+      disabledReason: controlReason,
+    },
+    'separator',
+    {
+      label: showFrame ? 'Hide device frame' : 'Show device frame',
+      icon: <Smartphone />,
+      onSelect: () => setShowFrame((f) => !f),
+    },
+    {
+      label: prefs.navButtons ? 'Hide navigation buttons' : 'Show navigation buttons',
+      icon: <Home />,
+      onSelect: () => updatePrefs({ navButtons: !prefs.navButtons }),
+    },
+    {
+      label: prefs.swipePad ? 'Hide swipe pad' : 'Show swipe pad',
+      icon: <Move />,
+      onSelect: () => updatePrefs({ swipePad: !prefs.swipePad }),
+    },
+  ];
+
+  const failed = isVideoFailure(videoStatus);
+  const starting = waiting && !hadFrame.current;
+  const reconnecting = !failed && !starting && videoStatus !== 'streaming';
+  const failView = videoView(videoStatus);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex min-h-[420px] flex-1 flex-col pb-[calc(3.5rem+env(safe-area-inset-bottom))] sm:pb-0">
       {/* Hidden file input for APK install */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".apk"
-        className="hidden"
-        onChange={handleFileInputChange}
+      <input ref={fileInputRef} type="file" accept=".apk" className="hidden" onChange={handleFileInputChange} />
+
+      <ViewerToolbar
+        audio={audio}
+        audioUsable={audioUsable}
+        audioTitle={audioTitle}
+        onToggleMute={() => void audioRef.current?.toggleMute()}
+        onVolume={(v) => audioRef.current?.setVolume(v)}
+        keyboardOpen={showTextInput}
+        onKeyboard={() => setShowTextInput((t) => !t)}
+        clipboardOpen={showClipboard}
+        onClipboard={() => setShowClipboard((c) => !c)}
+        capturing={capturing}
+        onScreenshot={handleScreenshot}
+        onWake={handleWake}
+        controlOk={controlOk}
+        controlReason={controlReason}
+        moreItems={moreItems}
       />
 
-      {/* Status bar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800">
-        <div className="flex items-center gap-3 text-xs">
-          <span className={statusColor}>{videoStatus}</span>
-          <span className="text-gray-500">|</span>
-          <span className="text-gray-400">Control: {controlStatus}</span>
-          {fps > 0 && (
-            <>
-              <span className="text-gray-500">|</span>
-              <span className="text-gray-400">{fps} fps</span>
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => void audioRef.current?.toggleMute()}
-            disabled={!audioUsable}
-            title={audioTitle}
-            aria-pressed={audioUsable && !audio.muted}
-            className={`px-2 py-1 text-[10px] rounded disabled:opacity-50 ${
-              audioUsable && !audio.muted ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-            }`}
-          >
-            {audio.state === 'connecting' || audio.state === 'reconnecting' ? 'Audio...' :
-              !audioUsable ? 'No audio' : audio.muted ? 'Unmute' : 'Mute'}
-          </button>
-          {audioUsable && (
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={audio.volume}
-              onChange={e => audioRef.current?.setVolume(Number(e.target.value))}
-              aria-label="Volume"
-              title={`Volume ${Math.round(audio.volume * 100)}%`}
-              className="w-16 accent-brand-500"
-            />
-          )}
-          <button
-            onClick={() => setShowFrame(f => !f)}
-            className={`px-2 py-1 text-[10px] rounded ${
-              showFrame ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-            }`}
-          >
-            Frame
-          </button>
-          <button
-            onClick={() => updatePrefs({ navButtons: !prefs.navButtons })}
-            title="Back, Home, Recents and All apps under the screen"
-            className={`px-2 py-1 text-[10px] rounded ${
-              prefs.navButtons ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-            }`}
-          >
-            Buttons
-          </button>
-          <button
-            onClick={() => updatePrefs({ swipePad: !prefs.swipePad })}
-            title="A floating pad that swipes the screen up, down, left or right"
-            className={`px-2 py-1 text-[10px] rounded ${
-              prefs.swipePad ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-            }`}
-          >
-            Swipe pad
-          </button>
-          <button
-            onClick={() => setShowTextInput(t => !t)}
-            className={`px-2 py-1 text-[10px] rounded ${
-              showTextInput ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-            }`}
-          >
-            Keyboard
-          </button>
-          <button
-            onClick={() => setShowClipboard(c => !c)}
-            className={`px-2 py-1 text-[10px] rounded ${
-              showClipboard ? 'bg-brand-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-            }`}
-          >
-            Clipboard
-          </button>
-          <button
-            onClick={handlePaste}
-            className="px-2 py-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded"
-          >
-            Paste
-          </button>
-          <button
-            onClick={handleCopy}
-            className="px-2 py-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded"
-          >
-            Copy
-          </button>
-          <button
-            onClick={handleInstallAPKClick}
-            className="px-2 py-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded"
-          >
-            Install APK
-          </button>
-          <button
-            onClick={handleScreenshot}
-            disabled={capturing}
-            className="px-2 py-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded disabled:opacity-50"
-          >
-            {capturing ? 'Capturing...' : 'Screenshot'}
-          </button>
-          <button
-            onClick={() => inputRef.current?.sendWake()}
-            className="px-2 py-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded"
-          >
-            Wake
-          </button>
-          <button
-            onClick={() => inputRef.current?.sendScreenOff()}
-            className="px-2 py-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded"
-          >
-            Screen Off
-          </button>
-        </div>
-      </div>
+      {/* Narrow screens have no room for the volume slider in the bottom bar. */}
+      {audioUsable && !audio.muted && (
+        <label className="flex items-center gap-3 border-b border-vx-hairline bg-vx-surface px-4 py-2 sm:hidden">
+          <span className="vx-label">Volume</span>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={audio.volume}
+            onChange={(e) => audioRef.current?.setVolume(Number(e.target.value))}
+            title={`Volume ${Math.round(audio.volume * 100)}%`}
+            className="min-w-0 flex-1 accent-vx-accent"
+          />
+        </label>
+      )}
 
       {/* Canvas with drop zone */}
       <div
         ref={containerRef}
-        className="flex-1 flex items-center justify-center bg-black overflow-hidden relative"
+        className="relative flex min-h-[240px] flex-1 items-center justify-center overflow-hidden bg-vx-recessed"
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
-        {dragging && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-brand-600/20 border-2 border-dashed border-brand-500 rounded-lg">
-            <span className="text-brand-300 text-sm font-medium">Drop files to push to device</span>
-          </div>
-        )}
         <canvas
           ref={canvasRef}
-          className={showFrame ? 'object-contain' : 'max-w-full max-h-full object-contain'}
+          tabIndex={0}
+          role="application"
+          aria-label="Phone screen. Click or focus to type into the phone; Shift+Escape returns to the page."
+          className="max-h-full max-w-full object-contain"
           style={{
             cursor: 'default',
-            ...(showFrame ? {
-              maxWidth: 'calc(100% - 32px)',
-              maxHeight: 'calc(100% - 32px)',
-              borderRadius: '2rem',
-              boxShadow: '0 0 0 12px #1f2937, 0 0 0 13px #374151, 0 25px 50px -12px rgba(0,0,0,0.5)',
-            } : {}),
+            ...(showFrame
+              ? {
+                  maxWidth: 'calc(100% - 32px)',
+                  maxHeight: 'calc(100% - 32px)',
+                  borderRadius: '16px',
+                  boxShadow: '0 0 0 8px rgb(var(--vx-elevated)), 0 0 0 9px rgb(var(--vx-control))',
+                }
+              : {}),
           }}
         />
+
+        {transfer && (
+          <div
+            role="status"
+            className="absolute inset-x-0 top-0 z-10 border-b border-vx-hairline bg-vx-elevated px-3 py-2 text-sm text-vx-fg"
+          >
+            <div className="flex items-center gap-2">
+              <LoaderCircle size={14} className="animate-spin text-vx-accent" aria-hidden />
+              <span className="min-w-0 truncate">{transfer}…</span>
+            </div>
+            <div className="mt-2 h-0.5 bg-vx-hairline">
+              <div className="h-full w-full animate-pulse bg-vx-accent" />
+            </div>
+          </div>
+        )}
+
+        {dragging && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-vx-accent bg-vx-accent/10">
+            <span className="font-mono text-xs uppercase tracking-wide text-vx-accent">Drop files to send to the phone</span>
+          </div>
+        )}
+
+        {/* Reconnecting: the last frame stays visible underneath. */}
+        {reconnecting && (
+          <div className="absolute bottom-3 left-3 z-10 border border-vx-warn/40 bg-vx-elevated px-2.5 py-1.5">
+            <StatusChip status={videoView('reconnecting')} />
+          </div>
+        )}
+
+        {/* Starting for the first time. */}
+        {starting && (
+          <div role="status" className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-vx-recessed/90 p-4 text-center">
+            {slow ? (
+              <>
+                <p className="text-lg font-extrabold">Still starting…</p>
+                <p className="max-w-sm text-sm text-vx-fg-muted">
+                  The video hasn&apos;t arrived yet. The phone may be busy or the session may need a restart.
+                </p>
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button variant="primary" size="lg" icon={<RotateCw size={16} />} onClick={retry}>
+                    Retry
+                  </Button>
+                  <BackButton />
+                </div>
+              </>
+            ) : (
+              <p className="inline-flex items-center gap-2 text-sm text-vx-fg-muted">
+                <LoaderCircle size={16} className="animate-spin text-vx-accent" aria-hidden />
+                Starting video…
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* The stream failed. */}
+        {failed && (
+          <div role="alert" className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-vx-recessed/90 p-4 text-center">
+            <StatusChip status={failView} withHint={false} />
+            <p className="max-w-sm text-sm text-vx-fg-muted">{failView.hint}</p>
+            <p className="font-mono text-[11px] uppercase tracking-wide text-vx-fg-label">Details: {videoStatus}</p>
+            <Button variant="primary" size="lg" icon={<RotateCw size={16} />} onClick={retry}>
+              Retry
+            </Button>
+          </div>
+        )}
+
         {prefs.swipePad && (
           <SwipePad
             boundsRef={containerRef}
@@ -377,77 +481,41 @@ export function DeviceViewer({ serial, onStreamLost }: DeviceViewerProps) {
             onMove={(padPos) => setPrefs((p) => ({ ...p, padPos }))}
             onMoved={(padPos) => updatePrefs({ padPos })}
             onSwipe={(dir) => inputRef.current?.swipe(dir)}
-            disabled={controlStatus !== 'connected'}
+            disabled={!controlOk}
+            disabledReason={controlReason}
           />
-        )}
-        {toast && (
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 bg-gray-800/90 text-gray-200 text-xs rounded-lg border border-gray-700 z-30">
-            {toast}
-          </div>
         )}
       </div>
 
       {prefs.navButtons && (
-        <NavBar onNav={(action) => inputRef.current?.nav(action)} disabled={controlStatus !== 'connected'} />
+        <NavBar
+          onNav={(action) => inputRef.current?.nav(action)}
+          disabled={!controlOk}
+          disabledReason={controlReason}
+        />
       )}
 
-      {/* Clipboard panel */}
-      {showClipboard && (
-        <div className="px-4 py-2 bg-gray-900 border-t border-gray-800">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[10px] text-gray-500 uppercase tracking-wider">Clipboard</span>
-          </div>
-          <div className="flex items-start gap-2">
-            <textarea
-              value={clipboardText}
-              onChange={e => setClipboardText(e.target.value)}
-              onKeyDown={e => e.stopPropagation()}
-              rows={2}
-              className="flex-1 px-3 py-1.5 text-xs bg-gray-800 border border-gray-700 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-brand-500 resize-none"
-              placeholder="Clipboard text..."
-            />
-            <div className="flex flex-col gap-1">
-              <button
-                onClick={handleCopy}
-                className="px-2 py-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 rounded"
-              >
-                From Device
-              </button>
-              <button
-                onClick={() => {
-                  if (clipboardText) {
-                    inputRef.current?.sendSetClipboard(clipboardText, true);
-                    showToast('Pasted to device');
-                  }
-                }}
-                className="px-2 py-1 text-[10px] bg-brand-600 hover:bg-brand-700 text-white rounded"
-              >
-                To Device
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Blind text input */}
       {showTextInput && (
-        <div className="flex items-center gap-2 px-4 py-2 bg-gray-900 border-t border-gray-800">
-          <input
-            type="text"
-            value={textValue}
-            onChange={e => setTextValue(e.target.value)}
-            onKeyDown={handleTextKeyDown}
-            placeholder="Type text to send to device..."
-            className="flex-1 px-3 py-1.5 text-xs bg-gray-800 border border-gray-700 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-brand-500"
-            autoFocus
-          />
-          <button
-            onClick={handleTextSend}
-            className="px-3 py-1.5 text-xs bg-brand-600 hover:bg-brand-700 text-white rounded"
-          >
-            Send
-          </button>
-        </div>
+        <TextBar
+          value={textValue}
+          onChange={setTextValue}
+          onSend={handleTextSend}
+          onClose={() => setShowTextInput(false)}
+          disabled={!controlOk}
+          reason={controlReason}
+        />
+      )}
+
+      {showClipboard && (
+        <ClipboardPanel
+          value={clipboardText}
+          onChange={setClipboardText}
+          onPasteToPhone={handlePasteToPhone}
+          onCopyFromPhone={handleCopyFromPhone}
+          onClose={() => setShowClipboard(false)}
+          disabled={!controlOk}
+          reason={controlReason}
+        />
       )}
     </div>
   );
