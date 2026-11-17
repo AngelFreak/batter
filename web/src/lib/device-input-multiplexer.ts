@@ -1,4 +1,5 @@
 import { CanvasKeys } from "./canvas-keys";
+import { controlDenied } from "./control-probe";
 import { getToken } from "./auth";
 import { WheelGestures } from "./wheel-gesture";
 import { NavAction, navMessages } from "./device-nav";
@@ -61,7 +62,9 @@ export class MultiplexerInputHandler {
     const conn: DeviceConnection = { serial, ws, hasControl: false };
     this.connections.set(serial, conn);
 
+    let opened = false;
     ws.onopen = () => {
+      opened = true;
       conn.hasControl = true;
       this.onStatusChange?.(serial, "connected");
     };
@@ -73,6 +76,12 @@ export class MultiplexerInputHandler {
       // re-added meanwhile, don't drop the newer connection.
       if (this.connections.get(serial) === conn) {
         this.connections.delete(serial);
+        // Refused before it opened: maybe no control permission (see controlDenied).
+        if (!opened) {
+          controlDenied(serial).then((denied) => {
+            if (denied && !this.connections.has(serial)) this.onStatusChange?.(serial, "denied");
+          });
+        }
       }
     };
 

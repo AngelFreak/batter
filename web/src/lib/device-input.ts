@@ -1,4 +1,5 @@
 import { CanvasKeys } from "./canvas-keys";
+import { controlDenied } from "./control-probe";
 import { getToken } from "./auth";
 import { Reconnector } from "./reconnect";
 import { WheelGestures } from "./wheel-gesture";
@@ -62,8 +63,10 @@ export class DeviceInputHandler {
     const url = `${base}/ws/device/${encodeURIComponent(this.serial)}/control?token=${encodeURIComponent(token || '')}`;
 
     this.ws = new WebSocket(url);
+    let opened = false;
 
     this.ws.onopen = () => {
+      opened = true;
       // Control has no steady data flow to wait for; RBAC/auth failures are
       // rejected before the upgrade, so an open socket is a healthy one.
       this.reconnector.reset();
@@ -78,6 +81,14 @@ export class DeviceInputHandler {
       if (!this.stopped) {
         this.onStatusChange?.("reconnecting");
         this.reconnector.schedule();
+        // Refused before it opened: maybe no control permission (see controlDenied).
+        if (!opened) {
+          controlDenied(this.serial).then((denied) => {
+            if (!denied || this.stopped) return;
+            this.reconnector.cancel();
+            this.onStatusChange?.("denied");
+          });
+        }
       } else {
         this.onStatusChange?.("disconnected");
       }

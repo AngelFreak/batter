@@ -87,6 +87,8 @@ export type FakeCanvas = HTMLCanvasElement & {
   fire(type: string, event?: Record<string, unknown>): FiredEvent;
   /** How many times focus() was called. */
   focusCalls: number;
+  /** How many times blur() was called. */
+  blurCalls: number;
 };
 
 export function fakeCanvas(): FakeCanvas {
@@ -96,11 +98,15 @@ export function fakeCanvas(): FakeCanvas {
     height: 0,
     tabIndex: -1,
     focusCalls: 0,
+    blurCalls: 0,
     getContext: () => ({ drawImage() {} }),
     addEventListener: target.addEventListener,
     removeEventListener: target.removeEventListener,
     focus() {
       canvas.focusCalls++;
+    },
+    blur() {
+      canvas.blurCalls++;
     },
     // 400x800 at the page origin, so clientX/Y map to x/400, y/800.
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 800 }),

@@ -94,3 +94,59 @@ test('a swipe stops when the viewer disconnects', () => {
   elapse(1_000);
   assert.equal(ws.sent.length, before);
 });
+
+// A control socket refused for lack of permission (403 before the upgrade)
+// looks like any failed connection to the browser. The handler asks once
+// over HTTP, and on a 403 reports "denied" instead of retrying forever.
+function stubFetch(status: number) {
+  const calls: string[] = [];
+  (globalThis as Record<string, unknown>).fetch = (url: string) => {
+    calls.push(url);
+    return Promise.resolve({ status });
+  };
+  return calls;
+}
+const flush = () => new Promise<void>((r) => setImmediate(r));
+
+test('a control socket refused with 403 reports denied and stops retrying', async () => {
+  const calls = stubFetch(403);
+  const h = new DeviceInputHandler(fakeCanvas());
+  const statuses: string[] = [];
+  h.setOnStatusChange((s) => statuses.push(s));
+  h.connect('A');
+  last().drop(); // closed before it ever opened
+  await flush();
+  assert.equal(calls.length, 1, 'no permission probe');
+  assert.match(calls[0], /\/ws\/device\/A\/control\?token=/);
+  assert.equal(statuses[statuses.length - 1], 'denied');
+  const before = FakeWebSocket.instances.length;
+  mock.timers.tick(120_000);
+  assert.equal(FakeWebSocket.instances.length, before, 'kept retrying after a 403');
+  h.disconnect();
+});
+
+test('a control socket that fails for another reason keeps reconnecting', async () => {
+  stubFetch(400); // permission fine; the plain GET just isn't a WebSocket
+  const h = new DeviceInputHandler(fakeCanvas());
+  const statuses: string[] = [];
+  h.setOnStatusChange((s) => statuses.push(s));
+  h.connect('A');
+  last().drop();
+  await flush();
+  assert.notEqual(statuses[statuses.length - 1], 'denied');
+  const before = FakeWebSocket.instances.length;
+  mock.timers.tick(120_000);
+  assert.ok(FakeWebSocket.instances.length > before, 'stopped reconnecting');
+  h.disconnect();
+});
+
+test('a socket that opened and then dropped is not probed', async () => {
+  const calls = stubFetch(403);
+  const h = new DeviceInputHandler(fakeCanvas());
+  h.connect('A');
+  last().open();
+  last().drop();
+  await flush();
+  assert.equal(calls.length, 0);
+  h.disconnect();
+});

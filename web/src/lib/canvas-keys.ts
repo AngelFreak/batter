@@ -30,6 +30,7 @@ function metastate(e: KeyboardEvent): number {
  * then: listening on the canvas rather than the document leaves keys typed in
  * buttons and text fields to the page. Every key pressed on the screen is
  * released on the phone, even if focus moves before the key comes up.
+ * Shift+Esc leaves the screen, since Tab is sent to the phone.
  */
 export class CanvasKeys {
   private target: HTMLElement | null = null;
@@ -57,6 +58,14 @@ export class CanvasKeys {
 
   private handleKeyDown = (e: KeyboardEvent) => {
     if (e.isComposing) return;
+
+    // Tab goes to the phone, so Shift+Esc is the way back to the page for
+    // keyboard users. Plain Esc stays Back on the phone.
+    if (e.key === "Escape" && e.shiftKey) {
+      e.preventDefault();
+      this.target?.blur();
+      return;
+    }
 
     if ((e.ctrlKey || e.metaKey) && e.key === "v" && this.sink.paste) {
       e.preventDefault();

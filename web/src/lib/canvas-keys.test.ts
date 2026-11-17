@@ -110,6 +110,18 @@ for (const rig of rigs) {
     for (const w of ws) assert.deepEqual(msgs(w), []);
   });
 
+  test(`${rig.name}: Shift+Esc hands focus back to the page instead of reaching the phone`, () => {
+    const { canvas, ws } = rig.setup();
+    const blurs = canvas.blurCalls;
+    const e = canvas.fire('keydown', { code: 'Escape', key: 'Escape', shiftKey: true });
+    assert.equal(canvas.blurCalls, blurs + 1, 'screen kept focus: keyboard users are trapped');
+    assert.ok(e.defaultPrevented);
+    for (const w of ws) assert.deepEqual(msgs(w), []);
+    // Plain Esc is still Back on the phone (keycode 111).
+    canvas.fire('keydown', { code: 'Escape', key: 'Escape' });
+    for (const w of ws) assert.deepEqual(msgs(w).map((m) => m.keycode), [111]);
+  });
+
   test(`${rig.name}: pressing the screen gives it keyboard focus`, () => {
     const { canvas } = rig.setup();
     canvas.fire('mousedown', { button: 0, clientX: 10, clientY: 10 });

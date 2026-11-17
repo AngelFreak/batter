@@ -50,6 +50,7 @@ const config: Config = {
         headline: '-0.02em',
       },
       height: { touch: '44px' },
+      width: { touch: '44px' },
       minHeight: { touch: '44px' },
       minWidth: { touch: '44px' },
       transitionDuration: { DEFAULT: '150ms' },

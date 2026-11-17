@@ -48,7 +48,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={cx(
         'inline-flex items-center justify-center gap-2 shrink-0 whitespace-nowrap rounded-sm border bg-transparent',
         'font-mono font-medium uppercase tracking-wide transition-colors',
-        'disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none',
+        // No pointer-events-none: the title (why it's disabled) must still show on hover.
+        'disabled:opacity-50 disabled:cursor-not-allowed',
         'aria-pressed:border-vx-accent aria-pressed:text-vx-accent aria-pressed:bg-vx-accent/10',
         VARIANT[variant],
         iconOnly ? ICON_ONLY[size] : SIZE[size],
