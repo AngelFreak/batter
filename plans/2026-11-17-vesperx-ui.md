@@ -1,7 +1,7 @@
 # Plan: VesperX visual overhaul of the web UI
 
 **Date:** 2026-11-17 · **Branch:** `feature/vesperx-ui` (worktree, from `main` @ e7917ec)
-**Status:** built, verified in the browser, and code-reviewed (Codex APPROVE, round 4). Awaiting the founder's go-ahead to push and open a PR for third-party review.
+**Status:** built, verified in the browser, and reviewed: Codex APPROVE, then a GLM third-party review whose finding was fixed. Merged to `main` with PR #9 on the founder's instruction.
 
 ## What
 
@@ -419,8 +419,44 @@ family, or the whole reason is replaced.
 issue in the commit." Codex noted that some valid IPv4-embedded IPv6 forms fall
 back to the generic sentence, which is safe. Accepted as is.
 
-**Code-review consensus:** reached 2026-11-17, Codex approving at round 4. The
-third-party review before merge (§2.6) is still to come, on the PR.
+**Code-review consensus:** reached 2026-11-17, Codex approving at round 4.
+
+### Third-party review before merge (§2.6), PR #9
+
+**Reviewer:** GLM-5.3 (Z.AI) through the `glm` CLI, read-only, 2026-11-17.
+- **Vendor:** neither Anthropic (the author) nor OpenAI (the plan and code reviewer).
+- **Limitation it stated:** its session had no shell, so it reviewed the HEAD state of
+  every changed file under `web/` and checked claims against the Go backend. It did
+  not read a line-by-line diff.
+
+**Verdict: APPROVE WITH CHANGES.** It found no HIGH issues and no security regression,
+and called the error-text allowlisting "a genuine hardening".
+- **F1, MED. Keys could stay down on the phone after Alt+Tab or Cmd+Tab.**
+  `CanvasKeys` released held keys only on the canvas's own blur. **Fixed** in d82181a:
+  - held keys are now also released on window blur, and the listener is removed on
+    detach;
+  - tests cover both handlers and fail without the fix;
+  - Codex reviewed the diff: APPROVE.
+  - Not browser-checked: headless Chromium can't switch apps.
+- **F2, MED. Multiplexer control sockets never reconnect after a drop.** **Not a
+  regression**: the multiplexer at e7917ec had no retry either. Left as a follow-up.
+- **F3, LOW. The 403 probe sends the token as a URL parameter.** Every WebSocket URL
+  already does this; `WSAuth` reads only the query parameter. Left as a backend
+  follow-up (accept a Bearer header on the control route).
+
+**Merge:** on the founder's instruction, 2026-11-17 ("Yes review push and merge").
+- The founder's account merges it, and so does the author's session. There is no human
+  review on GitHub.
+- The §2.2 and §2.6 reviews are the AI reviews above, from two other vendors.
+
+## Follow-ups
+- Multiplexer control reconnect with backoff, like `DeviceInputHandler` (GLM F2).
+- Backend:
+  - stop an admin demoting themselves, and protect the last admin;
+  - end open sessions when access is revoked;
+  - stop returning raw `err.Error()` text (about 15 handlers);
+  - accept a Bearer header on `/ws/.../control` (GLM F3).
+- Portal release notes when a version with this change is released (§2.7).
 
 ## Deviations (found while building)
 
